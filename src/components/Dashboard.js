@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
 import SolanaStatus from './SolanaStatus';
 import SDKStatus from './SDKStatus';
@@ -16,8 +16,21 @@ function Dashboard() {
     loading,
     error,
     disconnectWallet,
-    refreshData
+    refreshData,
+    createDeposit,
+    createTransfer,
+    createWithdraw
   } = useCipherPay();
+
+  const [actionLoading, setActionLoading] = useState(false);
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('');
+  const [transferAmount, setTransferAmount] = useState('');
+  const [transferRecipient, setTransferRecipient] = useState('');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawRecipient, setWithdrawRecipient] = useState('');
 
   useEffect(() => {
     if (!isInitialized) {
@@ -51,6 +64,83 @@ function Dashboard() {
   const formatBalance = (balance) => {
     // For Solana, 1 SOL = 1,000,000,000 lamports
     return Number(balance) / 1e9; // Convert lamports to SOL
+  };
+
+  const handleDeposit = async () => {
+    if (!depositAmount || parseFloat(depositAmount) <= 0) {
+      alert('Please enter a valid deposit amount');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const amountInLamports = BigInt(Math.floor(parseFloat(depositAmount) * 1e9));
+      const txHash = await createDeposit(amountInLamports);
+      console.log('Deposit successful:', txHash);
+      setShowDepositModal(false);
+      setDepositAmount('');
+      await refreshData();
+      alert(`Deposit successful! Transaction: ${txHash?.txHash || txHash || 'pending'}`);
+    } catch (err) {
+      console.error('Failed to deposit:', err);
+      alert(`Deposit failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleTransfer = async () => {
+    if (!transferAmount || parseFloat(transferAmount) <= 0) {
+      alert('Please enter a valid transfer amount');
+      return;
+    }
+    if (!transferRecipient || transferRecipient.trim() === '') {
+      alert('Please enter a recipient address');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const amountInLamports = BigInt(Math.floor(parseFloat(transferAmount) * 1e9));
+      const transaction = await createTransfer(transferRecipient.trim(), amountInLamports);
+      console.log('Transfer successful:', transaction);
+      setShowTransferModal(false);
+      setTransferAmount('');
+      setTransferRecipient('');
+      await refreshData();
+      const txHash = transaction?.id || transaction?.txHash || 'pending';
+      alert(`Transfer successful! Transaction: ${txHash}`);
+    } catch (err) {
+      console.error('Failed to transfer:', err);
+      alert(`Transfer failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleWithdraw = async () => {
+    if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) {
+      alert('Please enter a valid withdraw amount');
+      return;
+    }
+    if (!withdrawRecipient || withdrawRecipient.trim() === '') {
+      alert('Please enter a recipient address');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const amountInLamports = BigInt(Math.floor(parseFloat(withdrawAmount) * 1e9));
+      const result = await createWithdraw(amountInLamports, withdrawRecipient.trim());
+      console.log('Withdraw successful:', result);
+      setShowWithdrawModal(false);
+      setWithdrawAmount('');
+      setWithdrawRecipient('');
+      await refreshData();
+      alert(`Withdraw successful! Transaction: ${result.txHash || 'pending'}`);
+    } catch (err) {
+      console.error('Failed to withdraw:', err);
+      alert(`Withdraw failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   if (loading) {
@@ -129,6 +219,77 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Actions */}
+        <div className="bg-white overflow-hidden shadow rounded-lg mb-6">
+          <div className="px-4 py-5 sm:p-6">
+            <h2 className="text-lg font-medium text-gray-900 mb-4">Actions</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Deposit */}
+              <button
+                onClick={() => setShowDepositModal(true)}
+                disabled={actionLoading}
+                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div>
+                  <span className="rounded-lg inline-flex p-3 bg-green-50 text-green-700 ring-4 ring-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                  </span>
+                </div>
+                <div className="mt-8">
+                  <h3 className="text-lg font-medium text-left">Deposit</h3>
+                  <p className="mt-2 text-sm text-gray-500 text-left">
+                    Deposit funds into your shielded account
+                  </p>
+                </div>
+              </button>
+
+              {/* Transfer */}
+              <button
+                onClick={() => setShowTransferModal(true)}
+                disabled={actionLoading}
+                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div>
+                  <span className="rounded-lg inline-flex p-3 bg-blue-50 text-blue-700 ring-4 ring-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                    </svg>
+                  </span>
+                </div>
+                <div className="mt-8">
+                  <h3 className="text-lg font-medium text-left">Transfer</h3>
+                  <p className="mt-2 text-sm text-gray-500 text-left">
+                    Transfer funds to another shielded account
+                  </p>
+                </div>
+              </button>
+
+              {/* Withdraw */}
+              <button
+                onClick={() => setShowWithdrawModal(true)}
+                disabled={actionLoading}
+                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div>
+                  <span className="rounded-lg inline-flex p-3 bg-red-50 text-red-700 ring-4 ring-white">
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+                    </svg>
+                  </span>
+                </div>
+                <div className="mt-8">
+                  <h3 className="text-lg font-medium text-left">Withdraw</h3>
+                  <p className="mt-2 text-sm text-gray-500 text-left">
+                    Withdraw funds from your shielded account
+                  </p>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Solana Integration Status */}
         <div className="mb-6">
           <SolanaStatus />
@@ -137,99 +298,6 @@ function Dashboard() {
         {/* SDK Status */}
         <div className="mb-6">
           <SDKStatus />
-        </div>
-
-        {/* Quick Actions */}
-        <div className="bg-white overflow-hidden shadow rounded-lg mb-6">
-          <div className="px-4 py-5 sm:p-6">
-            <h2 className="text-lg font-medium text-gray-900 mb-4">Quick Actions</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              <Link
-                to="/transaction"
-                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300"
-              >
-                <div>
-                  <span className="rounded-lg inline-flex p-3 bg-indigo-50 text-indigo-700 ring-4 ring-white">
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />
-                    </svg>
-                  </span>
-                </div>
-                <div className="mt-8">
-                  <h3 className="text-lg font-medium">
-                    <span className="absolute inset-0" aria-hidden="true" />
-                    Send Transaction
-                  </h3>
-                  <p className="mt-2 text-sm text-gray-500">
-                    Create a new privacy-preserving transaction
-                  </p>
-                </div>
-              </Link>
-
-              <Link
-                to="/proof"
-                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300"
-              >
-                <div>
-                  <span className="rounded-lg inline-flex p-3 bg-green-50 text-green-700 ring-4 ring-white">
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </span>
-                </div>
-                <div className="mt-8">
-                  <h3 className="text-lg font-medium">
-                    <span className="absolute inset-0" aria-hidden="true" />
-                    Generate Proof
-                  </h3>
-                  <p className="mt-2 text-sm text-gray-500">
-                    Create zero-knowledge proofs for verification
-                  </p>
-                </div>
-              </Link>
-
-              <Link
-                to="/auditor"
-                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300"
-              >
-                <div>
-                  <span className="rounded-lg inline-flex p-3 bg-yellow-50 text-yellow-700 ring-4 ring-white">
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                    </svg>
-                  </span>
-                </div>
-                <div className="mt-8">
-                  <h3 className="text-lg font-medium">
-                    <span className="absolute inset-0" aria-hidden="true" />
-                    Auditor View
-                  </h3>
-                  <p className="mt-2 text-sm text-gray-500">
-                    Audit transactions and verify proofs
-                  </p>
-                </div>
-              </Link>
-
-              <button
-                onClick={refreshData}
-                className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300"
-              >
-                <div>
-                  <span className="rounded-lg inline-flex p-3 bg-blue-50 text-blue-700 ring-4 ring-white">
-                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  </span>
-                </div>
-                <div className="mt-8">
-                  <h3 className="text-lg font-medium">Refresh Data</h3>
-                  <p className="mt-2 text-sm text-gray-500">
-                    Update balance and transaction status
-                  </p>
-                </div>
-              </button>
-            </div>
-          </div>
         </div>
 
         {/* Recent Activity */}
@@ -260,6 +328,161 @@ function Dashboard() {
             )}
           </div>
         </div>
+
+        {/* Deposit Modal */}
+        {showDepositModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowDepositModal(false)}>
+            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white" onClick={(e) => e.stopPropagation()}>
+              <div className="mt-3">
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Deposit Funds</h3>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Amount (SOL)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={depositAmount}
+                    onChange={(e) => setDepositAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="0.0"
+                  />
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowDepositModal(false);
+                      setDepositAmount('');
+                    }}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeposit}
+                    disabled={actionLoading || !depositAmount}
+                    className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading ? 'Processing...' : 'Deposit'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Transfer Modal */}
+        {showTransferModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowTransferModal(false)}>
+            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white" onClick={(e) => e.stopPropagation()}>
+              <div className="mt-3">
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Transfer Funds</h3>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Recipient Address
+                  </label>
+                  <input
+                    type="text"
+                    value={transferRecipient}
+                    onChange={(e) => setTransferRecipient(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="0x..."
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Amount (SOL)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={transferAmount}
+                    onChange={(e) => setTransferAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="0.0"
+                  />
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowTransferModal(false);
+                      setTransferAmount('');
+                      setTransferRecipient('');
+                    }}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleTransfer}
+                    disabled={actionLoading || !transferAmount || !transferRecipient}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading ? 'Processing...' : 'Transfer'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Withdraw Modal */}
+        {showWithdrawModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowWithdrawModal(false)}>
+            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white" onClick={(e) => e.stopPropagation()}>
+              <div className="mt-3">
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Withdraw Funds</h3>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Recipient Address
+                  </label>
+                  <input
+                    type="text"
+                    value={withdrawRecipient}
+                    onChange={(e) => setWithdrawRecipient(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="0x..."
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Amount (SOL)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={withdrawAmount}
+                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="0.0"
+                  />
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowWithdrawModal(false);
+                      setWithdrawAmount('');
+                      setWithdrawRecipient('');
+                    }}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleWithdraw}
+                    disabled={actionLoading || !withdrawAmount || !withdrawRecipient}
+                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading ? 'Processing...' : 'Withdraw'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

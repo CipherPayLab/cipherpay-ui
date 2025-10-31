@@ -8,8 +8,8 @@ function Transaction() {
     isConnected,
     balance,
     spendableNotes,
-    createTransaction,
-    sendTransaction,
+    createTransfer,
+    sendTransfer,
     loading,
     error,
     clearError
@@ -54,13 +54,13 @@ function Transaction() {
       clearError();
       setTransactionStep('creating');
 
-      // Create the transaction
-      const transaction = await createTransaction(recipient, amount);
+      // Create the transfer
+      const transaction = await createTransfer(recipient, amount);
 
       setTransactionStep('sending');
 
-      // Send the transaction
-      const receipt = await sendTransaction(transaction);
+      // Send the transfer
+      const receipt = await sendTransfer(transaction);
       setTransactionHash(receipt.txHash);
       setTransactionStep('success');
 

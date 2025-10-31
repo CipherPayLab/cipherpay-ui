@@ -128,8 +128,8 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    // Transaction Management
-    const createTransaction = async (recipientPublicKey, amount) => {
+    // Transfer Management
+    const createTransfer = async (recipientPublicKey, amount) => {
         try {
             setLoading(true);
             setError(null);
@@ -143,7 +143,7 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    const sendTransaction = async (transaction) => {
+    const sendTransfer = async (transaction) => {
         try {
             setLoading(true);
             setError(null);
@@ -158,7 +158,7 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    const checkTransactionStatus = async (txHash) => {
+    const checkTransferStatus = async (txHash) => {
         try {
             setError(null);
             return await cipherPayService.checkTransactionStatus(txHash);
@@ -261,6 +261,22 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
+    // Withdrawal Management
+    const createWithdraw = async (amount, recipientAddress) => {
+        try {
+            setLoading(true);
+            setError(null);
+            const result = await cipherPayService.withdraw(amount, recipientAddress);
+            await updateServiceStatus(); // Refresh balance and notes
+            return result;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
     // Utility functions
     const refreshData = useCallback(() => {
         updateServiceStatus();
@@ -286,13 +302,16 @@ export const CipherPayProvider = ({ children }) => {
         connectWallet,
         disconnectWallet,
 
-        // Transaction Management
-        createTransaction,
-        sendTransaction,
-        checkTransactionStatus,
+        // Transfer Management
+        createTransfer,
+        sendTransfer,
+        checkTransferStatus,
 
         // Deposit Management
         createDeposit,
+
+        // Withdrawal Management
+        createWithdraw,
 
         // Proof Management
         generateProof,

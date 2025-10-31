@@ -20,7 +20,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "postinstall": "mkdir -p public/sdk && cp ../cipherpay-sdk/dist/browser/cipherpay-sdk.browser.js public/sdk/cipherpay-sdk.browser.js || true"
   },
   "eslintConfig": {
     "extends": [
