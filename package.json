@@ -5,22 +5,25 @@
   "browser": {
     "@cipherpay/sdk": "@cipherpay/sdk/dist/cipherpay-sdk.browser.js"
   },
+  "type": "module",
   "dependencies": {
     "@cipherpay/sdk": "file:../cipherpay-sdk",
-    "autoprefixer": "^10.4.14",
-    "axios": "^1.3.4",
-    "postcss": "^8.4.21",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-router-dom": "^6.10.0",
-    "react-scripts": "^5.0.1",
-    "tailwindcss": "^3.3.0"
+    "assert": "^2.1.0",
+    "autoprefixer": "^10.4.20",
+    "axios": "^1.7.9",
+    "buffer": "^6.0.3",
+    "circomlibjs": "^0.1.7",
+    "postcss": "^8.4.49",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1",
+    "tailwindcss": "^3.4.18"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "echo \"Error: no test specified\" && exit 1",
     "postinstall": "mkdir -p public/sdk && cp ../cipherpay-sdk/dist/browser/cipherpay-sdk.browser.js public/sdk/cipherpay-sdk.browser.js || true"
   },
   "eslintConfig": {
@@ -44,5 +47,12 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "events": "^3.3.0",
+    "stream-browserify": "^3.0.0",
+    "util": "^0.12.5",
+    "vite": "^5.4.6"
   }
 }

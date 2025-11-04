@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="description" content="CipherPay UI" />
+  <title>CipherPay</title>
+  <!-- Browser polyfills - must be available before SDK bundle loads -->
+  <script>
+    (function() {
+      // Process polyfill
+      if (typeof process === 'undefined') {
+        window.process = {
+          env: {
+            NODE_ENV: 'production'
+          },
+          browser: true,
+          version: '',
+          versions: {},
+          nextTick: function(fn) {
+            setTimeout(fn, 0);
+          },
+          cwd: function() {
+            return '/';
+          },
+          exit: function(code) {
+            throw new Error('process.exit called with code ' + code);
+          }
+        };
+      }
+    })();
+  </script>
+  <!-- Inject Buffer globally BEFORE any other scripts -->
+  <script type="module">
+    import { Buffer } from 'buffer';
+    window.Buffer = Buffer;
+    globalThis.Buffer = Buffer;
+    if (typeof global !== 'undefined') global.Buffer = Buffer;
+    console.log('[HTML] Buffer injected globally, has writeUInt32BE:', typeof Buffer.prototype.writeUInt32BE);
+  </script>
+  <!-- Load CipherPay SDK bundle -->
+  <script src="/sdk/cipherpay-sdk.browser.js"></script>
+</head>
+
+<body>
+  <noscript>You need to enable JavaScript to run this app.</noscript>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+
+</html>
+
+

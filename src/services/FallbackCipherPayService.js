@@ -155,18 +155,18 @@ class FallbackCipherPayService {
         this.merkleTreeClient = null;
         this.isInitialized = false;
         this.sdk = null;
-        this.useRealSDK = process.env.REACT_APP_USE_REAL_SDK === 'true';
+        this.useRealSDK = import.meta.env.VITE_USE_REAL_SDK === 'true';
         this.config = {
             chainType: 'solana', // Default to Solana for end-to-end testing
-            rpcUrl: process.env.REACT_APP_RPC_URL || 'http://127.0.0.1:8899', // Local Solana validator
-            relayerUrl: process.env.REACT_APP_RELAYER_URL || 'http://localhost:3000', // Local Solana relayer
-            programId: process.env.REACT_APP_PROGRAM_ID, // Solana program ID
-            enableCompliance: process.env.REACT_APP_ENABLE_COMPLIANCE !== 'false',
-            enableCaching: process.env.REACT_APP_ENABLE_CACHING !== 'false',
-            enableStealthAddresses: process.env.REACT_APP_ENABLE_STEALTH_ADDRESSES !== 'false',
+            rpcUrl: import.meta.env.VITE_RPC_URL || 'http://127.0.0.1:8899', // Local Solana validator
+            relayerUrl: import.meta.env.VITE_RELAYER_URL || 'http://localhost:3000', // Local Solana relayer
+            programId: import.meta.env.VITE_PROGRAM_ID, // Solana program ID
+            enableCompliance: import.meta.env.VITE_ENABLE_COMPLIANCE !== 'false',
+            enableCaching: import.meta.env.VITE_ENABLE_CACHING !== 'false',
+            enableStealthAddresses: import.meta.env.VITE_ENABLE_STEALTH_ADDRESSES !== 'false',
             cacheConfig: {
-                maxSize: parseInt(process.env.REACT_APP_CACHE_MAX_SIZE) || 1000,
-                defaultTTL: parseInt(process.env.REACT_APP_CACHE_DEFAULT_TTL) || 300000
+                maxSize: parseInt(import.meta.env.VITE_CACHE_MAX_SIZE) || 1000,
+                defaultTTL: parseInt(import.meta.env.VITE_CACHE_DEFAULT_TTL) || 300000
             }
         };
     }

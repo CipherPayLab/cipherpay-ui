@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import cipherPayService from '../services';
+import authService from '../services/authService';
 
 const CipherPayContext = createContext();
 
@@ -21,6 +22,8 @@ export const CipherPayProvider = ({ children }) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [sdk, setSdk] = useState(null);
+    const [isAuthenticated, setIsAuthenticated] = useState(authService.isAuthenticated());
+    const [authUser, setAuthUser] = useState(authService.getUser());
 
     // Initialize the service
     useEffect(() => {
@@ -277,6 +280,62 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
+    // Authentication Management
+    const signIn = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            const result = await authService.authenticate(sdk);
+            setIsAuthenticated(true);
+            setAuthUser(result.user);
+            return result;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const signUp = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            // Sign up is the same as sign in - server creates user on first challenge
+            const result = await authService.authenticate(sdk);
+            setIsAuthenticated(true);
+            setAuthUser(result.user);
+            return result;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const signOut = async () => {
+        try {
+            authService.clearAuth();
+            setIsAuthenticated(false);
+            setAuthUser(null);
+            await disconnectWallet();
+        } catch (err) {
+            console.error('Sign out error:', err);
+            // Clear auth even if wallet disconnect fails
+            setIsAuthenticated(false);
+            setAuthUser(null);
+        }
+    };
+
+    // Check authentication status on mount
+    useEffect(() => {
+        if (authService.isAuthenticated()) {
+            setIsAuthenticated(true);
+            setAuthUser(authService.getUser());
+        }
+    }, []);
+
     // Utility functions
     const refreshData = useCallback(() => {
         updateServiceStatus();
@@ -297,10 +356,17 @@ export const CipherPayProvider = ({ children }) => {
         loading,
         error,
         sdk,
+        isAuthenticated,
+        authUser,
 
         // Wallet Management
         connectWallet,
         disconnectWallet,
+
+        // Authentication
+        signIn,
+        signUp,
+        signOut,
 
         // Transfer Management
         createTransfer,

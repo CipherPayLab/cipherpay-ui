@@ -1,297 +1,469 @@
 // Auth Service - Handles authentication with cipherpay-server
 import axios from 'axios';
 import { poseidonHash } from '../lib/sdk';
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
 
-const SERVER_URL = process.env.REACT_APP_SERVER_URL || 'http://localhost:8788';
-
-// Load circomlibjs for BabyJubJub signing (we'll use a CDN or bundle it)
-let circomlib = null;
-async function loadCircomlib() {
-    if (circomlib) return circomlib;
-    try {
-        // Try to load from node_modules if available
-        circomlib = await import('circomlibjs');
-        return circomlib;
-    } catch (e) {
-        // Fallback: load from CDN if available
-        if (typeof window !== 'undefined' && window.circomlibjs) {
-            circomlib = window.circomlibjs;
-            return circomlib;
-        }
-        throw new Error('circomlibjs not available. Please include it in your build or via CDN.');
+/* ---------------- BigInt/bytes normalizers ---------------- */
+function toBigIntFlexible(v) {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return BigInt(v);
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (/^0x[0-9a-f]+$/i.test(s)) return BigInt(s);
+    if (/^[0-9a-f]+$/i.test(s) && s.length >= 16) return BigInt('0x' + s);
+    if (/^-?\d+$/.test(s)) return BigInt(s);
+    if (/^\d+(,\d+)+$/.test(s)) {
+      const bytes = s.split(',').map(x => parseInt(x, 10));
+      const hex = bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+      return BigInt('0x' + hex);
     }
+    throw new Error('Unsupported string for BigInt: ' + s.slice(0, 40) + (s.length > 40 ? '…' : ''));
+  }
+  // Handle Node Buffer JSON shape: { type: 'Buffer', data: [...] }
+  if (v && typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+    const hex = v.data.map(n => Number(n).toString(16).padStart(2, '0')).join('');
+    return BigInt('0x' + hex);
+  }
+  if (Array.isArray(v) || (v && typeof v.length === 'number')) {
+    const hex = Array.from(v, n => Number(n).toString(16).padStart(2, '0')).join('');
+    return BigInt('0x' + hex);
+  }
+  throw new Error('Unsupported type for BigInt: ' + typeof v);
 }
 
+// Turn {0:..., length:n} OR Uint8Array/number[]/hex/comma-string into Uint8Array
+function toUint8ArrayLoose(v) {
+  if (v instanceof Uint8Array) return v;
+  if (Array.isArray(v)) return new Uint8Array(v.map(n => Number(n) & 0xff));
+  if (v && typeof v === 'object' && typeof v.length === 'number') {
+    const len = Number(v.length) | 0;
+    const out = new Uint8Array(len);
+    for (let i = 0; i < len; i++) out[i] = Number(v[i] ?? 0) & 0xff;
+    return out;
+  }
+  if (v && typeof v === 'object' && v.type === 'Buffer' && Array.isArray(v.data)) {
+    return new Uint8Array(v.data.map(n => Number(n) & 0xff));
+  }
+  if (typeof v === 'string' && /^\d+(,\d+)+$/.test(v)) {
+    return new Uint8Array(v.split(',').map(x => parseInt(x, 10) & 0xff));
+  }
+  if (typeof v === 'string' && /^0x[0-9a-f]+$/i.test(v)) {
+    const hex = v.slice(2).padStart(v.length % 2 ? v.length + 1 : v.length, '0');
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+  }
+  return null;
+}
+
+function bytesToHex(u8) {
+  return [...u8].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Normalize identity.keypair.{privKey,pubKey} to BigInt eagerly on load
+function normalizeIdentityKeys(identity) {
+  if (!identity || !identity.keypair) return identity;
+  const kp = identity.keypair;
+  const norm = {};
+  for (const k of ['privKey', 'pubKey']) {
+    const src = kp[k];
+    try {
+      if (typeof src === 'bigint') {
+        norm[k] = src;
+      } else if (typeof src === 'string' || typeof src === 'number') {
+        norm[k] = toBigIntFlexible(src);
+      } else {
+        const u8 = toUint8ArrayLoose(src);
+        if (u8) {
+          norm[k] = BigInt('0x' + bytesToHex(u8));
+        } else {
+          norm[k] = toBigIntFlexible(String(src));
+        }
+      }
+    } catch (e) {
+      console.error('[AuthService] Failed to normalize key', k, 'type=', typeof src, 'value sample=', String(src).slice(0, 80));
+      throw e;
+    }
+  }
+  identity.keypair = norm;
+  return identity;
+}
+
+/* ---------------- circomlibjs loader ---------------- */
+let circomlib = null;
+let babyJub = null;
+let eddsa = null;
+
+async function loadCircomlib() {
+  if (circomlib && babyJub && eddsa) return { babyJub, eddsa, circomlib };
+  const lib = await import('circomlibjs');
+  console.log('[AuthService] circomlibjs loaded, available exports:', Object.keys(lib));
+  if (!babyJub) {
+    if (lib.buildBabyjub) {
+      console.log('[AuthService] Building BabyJub using buildBabyjub...');
+      babyJub = await lib.buildBabyjub();
+    } else if (lib.babyjub) {
+      console.log('[AuthService] Using existing babyjub...');
+      babyJub = lib.babyjub;
+    } else if (lib.default && lib.default.buildBabyjub) {
+      console.log('[AuthService] Building BabyJub using default.buildBabyjub...');
+      babyJub = await lib.default.buildBabyjub();
+    } else {
+      throw new Error('buildBabyjub not available in circomlibjs');
+    }
+  }
+  console.log('[AuthService] babyJub loaded:', !!babyJub, 'has F:', !!(babyJub && babyJub.F));
+
+  if (!eddsa) {
+    console.log('[AuthService] Looking for eddsa...');
+    if (lib.eddsa && typeof lib.eddsa.buildEddsa === 'function') {
+      console.log('[AuthService] Building EdDSA using eddsa.buildEddsa...');
+      eddsa = await lib.eddsa.buildEddsa();
+    } else if (lib.buildEddsa && typeof lib.buildEddsa === 'function') {
+      console.log('[AuthService] Building EdDSA using buildEddsa...');
+      eddsa = await lib.buildEddsa();
+    } else if (lib.default && lib.default.eddsa) {
+      if (typeof lib.default.eddsa.buildEddsa === 'function') {
+        console.log('[AuthService] Building EdDSA using default.eddsa.buildEddsa...');
+        eddsa = await lib.default.eddsa.buildEddsa();
+      } else {
+        console.log('[AuthService] Using default.eddsa directly...');
+        eddsa = lib.default.eddsa;
+      }
+    } else if (lib.eddsa) {
+      console.log('[AuthService] Using lib.eddsa directly...');
+      eddsa = lib.eddsa;
+    } else {
+      throw new Error('eddsa not available in circomlibjs');
+    }
+  }
+  circomlib = lib;
+  return { babyJub, eddsa, circomlib };
+}
+
+/* ---------------- Service ---------------- */
 class AuthService {
-    constructor() {
-        this.token = localStorage.getItem('cipherpay_token');
-        this.user = JSON.parse(localStorage.getItem('cipherpay_user') || 'null');
-        this.identity = JSON.parse(localStorage.getItem('cipherpay_identity') || 'null');
-    }
+  constructor() {
+    this.token = localStorage.getItem('cipherpay_token');
+    this.user = JSON.parse(localStorage.getItem('cipherpay_user') || 'null');
 
-    getAuthToken() {
-        return this.token;
-    }
-
-    getUser() {
-        return this.user;
-    }
-
-    getIdentity() {
-        return this.identity;
-    }
-
-    isAuthenticated() {
-        return !!this.token;
-    }
-
-    setAuthToken(token, user) {
-        this.token = token;
-        this.user = user;
-        if (token) {
-            localStorage.setItem('cipherpay_token', token);
-            localStorage.setItem('cipherpay_user', JSON.stringify(user || {}));
-        } else {
-            localStorage.removeItem('cipherpay_token');
-            localStorage.removeItem('cipherpay_user');
-        }
-    }
-
-    setIdentity(identity) {
-        this.identity = identity;
-        if (identity) {
-            localStorage.setItem('cipherpay_identity', JSON.stringify(identity));
-        } else {
+    const identityStr = localStorage.getItem('cipherpay_identity');
+    if (identityStr) {
+      try {
+        const parsed = JSON.parse(identityStr);
+        const convertBigInts = (obj) => {
+          if (obj === null || obj === undefined) return obj;
+          if (Array.isArray(obj)) return obj.map(convertBigInts);
+          if (typeof obj === 'object') {
+            const result = {};
+            for (const key in obj) {
+              if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                const value = obj[key];
+                if (typeof value === 'string' && /^-?\d+$/.test(value) && value.length > 15) {
+                  result[key] = BigInt(value);
+                } else if (typeof value === 'string' && /^\d+(,\d+)+$/.test(value)) {
+                  const nums = value.split(',').map(x => parseInt(x, 10));
+                  const hex = nums.map(b => b.toString(16).padStart(2, '0')).join('');
+                  result[key] = BigInt('0x' + hex);
+                } else if (typeof value === 'object') {
+                  result[key] = convertBigInts(value);
+                } else {
+                  result[key] = value;
+                }
+              }
+            }
+            return result;
+          }
+          return obj;
+        };
+        this.identity = normalizeIdentityKeys(convertBigInts(parsed));
+        
+        // Validate the loaded identity
+        if (this.identity?.keypair) {
+          const testPriv = toBigIntFlexible(this.identity.keypair.privKey);
+          const testPub = toBigIntFlexible(this.identity.keypair.pubKey);
+          if (typeof testPriv !== 'bigint' || typeof testPub !== 'bigint') {
+            console.warn('[AuthService] Loaded identity has invalid keys, clearing...');
+            this.identity = null;
             localStorage.removeItem('cipherpay_identity');
+          }
         }
+      } catch (e) {
+        console.warn('[AuthService] Failed to load identity from localStorage, clearing...', e);
+        this.identity = null;
+        localStorage.removeItem('cipherpay_identity');
+      }
+    } else {
+      this.identity = null;
     }
-
-    clearAuth() {
-        this.setAuthToken(null, null);
-        // Note: We might want to keep identity even after logout
+    
+    if (this.identity) {
+      this.saveIdentity(); // rewrite any legacy format right away
     }
+  }
 
-    // Get axios instance with auth header
-    getAuthenticatedAxios() {
-        const instance = axios.create({
-            baseURL: SERVER_URL,
-            headers: {
-                'Content-Type': 'application/json',
-            },
-        });
-
-        // Add auth token to requests
-        instance.interceptors.request.use(
-            (config) => {
-                if (this.token) {
-                    config.headers.Authorization = `Bearer ${this.token}`;
-                }
-                return config;
-            },
-            (error) => Promise.reject(error)
-        );
-
-        // Handle 401 responses (token expired)
-        instance.interceptors.response.use(
-            (response) => response,
-            (error) => {
-                if (error.response?.status === 401) {
-                    this.clearAuth();
-                    // Redirect to login would be handled by the component
-                }
-                return Promise.reject(error);
-            }
-        );
-
-        return instance;
+  saveIdentity() {
+    if (!this.identity) {
+      localStorage.removeItem('cipherpay_identity');
+      return;
     }
+    const replacer = (_, v) => {
+      if (typeof v === 'bigint') return v.toString(10);
+      if (v instanceof Uint8Array) return '0x' + bytesToHex(v);
+      return v;
+    };
+    localStorage.setItem('cipherpay_identity', JSON.stringify(this.identity, replacer));
+  }
 
-    // Get or create identity from SDK or create a new one
-    async getOrCreateIdentity(sdk = null) {
-        // Check if we have a stored identity
-        if (this.identity) {
-            return this.identity;
+  setAuthToken(token, user) {
+    this.token = token;
+    this.user = user;
+    if (token) {
+      localStorage.setItem('cipherpay_token', token);
+      localStorage.setItem('cipherpay_user', JSON.stringify(user));
+    } else {
+      localStorage.removeItem('cipherpay_token');
+      localStorage.removeItem('cipherpay_user');
+    }
+  }
+
+  clearIdentity() {
+    this.identity = null;
+    if (localStorage.getItem('cipherpay_identity')) {
+      localStorage.removeItem('cipherpay_identity');
+    }
+  }
+
+  clearAuth() {
+    this.setAuthToken(null, null);
+  }
+
+  getAuthenticatedAxios() {
+    const instance = axios.create({
+      baseURL: SERVER_URL,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    instance.interceptors.request.use(
+      (config) => {
+        if (this.token) config.headers.Authorization = `Bearer ${this.token}`;
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+    instance.interceptors.response.use(
+      (r) => r,
+      (error) => {
+        if (error?.response?.status === 401) this.setAuthToken(null, null);
+        return Promise.reject(error);
+      }
+    );
+    return instance;
+  }
+
+  isAuthenticated() { return !!this.token; }
+  getToken() { return this.token || null; }
+  getUser() { return this.user || null; }
+  _toBigIntFlexible(v) { return toBigIntFlexible(v); }
+
+  async getOrCreateIdentity(sdk = null) {
+    if (this.identity) {
+      // Validate existing identity - check if keys are properly normalized
+      try {
+        const testPrivKey = toBigIntFlexible(this.identity.keypair.privKey);
+        const testPubKey = toBigIntFlexible(this.identity.keypair.pubKey);
+        if (typeof testPrivKey === 'bigint' && typeof testPubKey === 'bigint') {
+          return this.identity;
         }
-
-        // Try to get from SDK if available
-        if (sdk?.identityManager?.getIdentity) {
-            const identity = await sdk.identityManager.getIdentity();
-            if (identity) {
-                this.setIdentity(identity);
-                return identity;
-            }
-        }
-
-        // Create new identity - simplified version
-        // In production, this should use SDK's createIdentity
-        // For now, we'll create a minimal structure
-        const identity = {
-            keypair: {
-                privKey: this.generateRandomField(),
-                pubKey: this.generateRandomField(),
-            },
-            viewKey: {
-                vk: this.generateRandomField(),
-            },
-            recipientCipherPayPubKey: null, // Will be computed
-        };
-
-        // Compute recipientCipherPayPubKey = Poseidon(pubKey, privKey)
-        identity.recipientCipherPayPubKey = await poseidonHash([
-            identity.keypair.pubKey,
-            identity.keypair.privKey,
-        ]);
-
-        this.setIdentity(identity);
-        return identity;
+        console.warn('[AuthService] Identity keys are corrupted, regenerating...');
+      } catch (e) {
+        console.warn('[AuthService] Identity validation failed, regenerating...', e);
+      }
+      // Clear corrupted identity
+      this.clearIdentity();
     }
 
-    generateRandomField() {
-        // Generate a random 254-bit field element (BigInt)
-        // Use crypto.getRandomValues for better randomness
-        const array = new Uint8Array(32);
-        if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-            crypto.getRandomValues(array);
-        } else {
-            // Fallback for older browsers
-            for (let i = 0; i < array.length; i++) {
-                array[i] = Math.floor(Math.random() * 256);
-            }
-        }
-        // Convert to BigInt, ensuring it's less than the field modulus
-        // Field modulus for BabyJubJub is approximately 2^254 + 2^253 + ...
-        const hex = Array.from(array).map(b => b.toString(16).padStart(2, '0')).join('');
-        return BigInt('0x' + hex);
+    let identity = null;
+    try {
+      if (!sdk) {
+        const _sdk = window.CipherPaySDK || window.parent?.CipherPaySDK;
+        if (_sdk) sdk = _sdk;
+      }
+      if (sdk && typeof sdk.getIdentity === 'function') {
+        identity = await sdk.getIdentity();
+      }
+    } catch {}
+
+    if (!identity) {
+      const privKey = BigInt(
+        '0x' +
+          crypto.getRandomValues(new Uint8Array(32))
+            .reduce((a, b) => a + b.toString(16).padStart(2, '0'), '')
+      );
+      const pubKey = privKey; // placeholder demo identity
+      identity = { keypair: { privKey, pubKey } };
     }
 
-    // Get ownerCipherPayPubKey as hex string
-    async getOwnerCipherPayPubKey(identity) {
-        if (!identity) {
-            identity = await this.getOrCreateIdentity();
-        }
-        const pubKey = identity.recipientCipherPayPubKey || identity.recipientCipherPayPubKey;
-        return '0x' + pubKey.toString(16).padStart(64, '0');
-    }
+    this.identity = normalizeIdentityKeys(identity);
+    this.saveIdentity();
+    return this.identity;
+  }
 
-    // Sign message with BabyJubJub EdDSA
-    async signBabyJub(messageField, privKey) {
-        const lib = await loadCircomlib();
-        const F = lib.babyJub.F;
-        const privKeyField = F.e(BigInt(privKey));
-        const msgField = F.e(BigInt(messageField));
+  async getOwnerCipherPayPubKey(identity) {
+    if (!identity) identity = await this.getOrCreateIdentity();
+    let { pubKey, privKey } = identity.keypair ?? {};
+    pubKey  = toBigIntFlexible(pubKey);
+    privKey = toBigIntFlexible(privKey);
+    const recipientCipherPayPubKey = await poseidonHash([pubKey, privKey]);
+    return '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
+  }
 
-        // Generate signature
-        const signature = lib.eddsa.signPoseidon(privKeyField, msgField);
-        
-        return {
-            R8x: signature.R8[0].toString(),
-            R8y: signature.R8[1].toString(),
-            S: signature.S.toString(),
-        };
-    }
+  async signBabyJub(messageField, privKey) {
+    const { babyJub, eddsa } = await loadCircomlib();
+    if (!babyJub || !babyJub.F) throw new Error('babyJub.F is not available.');
+    const F = babyJub.F;
+    const privKeyField = F.e(toBigIntFlexible(privKey));
+    const msgField     = F.e(toBigIntFlexible(messageField));
+    const signature = eddsa.signPoseidon(privKeyField, msgField);
+    const r8xBI = BigInt(babyJub.F.toObject(signature.R8[0]).toString());
+    const r8yBI = BigInt(babyJub.F.toObject(signature.R8[1]).toString());
+    const sBI   = BigInt(signature.S.toString());
+    return { 
+      R8x: '0x' + r8xBI.toString(16).padStart(64, '0'), 
+      R8y: '0x' + r8yBI.toString(16).padStart(64, '0'), 
+      S: '0x' + sBI.toString(16).padStart(64, '0') 
+    };
+  }
 
-    // Get auth pub key from identity (for new user registration)
-    async getAuthPubKey(identity) {
-        if (!identity) {
-            identity = await this.getOrCreateIdentity();
-        }
-        
-        // For now, derive from keypair. In production, might be separate
-        const lib = await loadCircomlib();
-        const F = lib.babyJub.F;
-        const privKeyField = F.e(BigInt(identity.keypair.privKey));
-        
-        // Derive public key from private key
-        const pubKey = lib.eddsa.prv2pub(privKeyField);
-        
-        return {
-            x: pubKey[0].toString(),
-            y: pubKey[1].toString(),
-        };
-    }
+  async getAuthPubKey(identity) {
+    if (!identity) identity = await this.getOrCreateIdentity();
+    const { babyJub, eddsa } = await loadCircomlib();
+    const F = babyJub.F;
 
-    // Request authentication challenge
-    async requestChallenge(ownerKey, authPubKey = null) {
-        try {
-            const response = await axios.post(`${SERVER_URL}/auth/challenge`, {
-                ownerKey,
-                authPubKey,
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Challenge request failed:', error);
-            throw new Error(error.response?.data?.error || 'Failed to request authentication challenge');
-        }
+    identity = normalizeIdentityKeys(identity);
+    console.log('[AuthService] getAuthPubKey - identity.keypair.privKey type:', typeof identity.keypair.privKey);
+    console.log('[AuthService] getAuthPubKey - identity.keypair.privKey sample:', String(identity.keypair.privKey).substring(0, 100));
+    
+    const skBI = toBigIntFlexible(identity.keypair.privKey);
+    console.log('[AuthService] getAuthPubKey - skBI type after toBigIntFlexible:', typeof skBI);
+    console.log('[AuthService] getAuthPubKey - skBI value:', skBI.toString().substring(0, 50));
+    
+    if (typeof skBI !== 'bigint') {
+      console.error('[AuthService] privKey normalization failed; got:', typeof skBI, String(skBI).slice(0, 80));
+      throw new Error('privKey is not bigint after normalization');
     }
+    
+    // Use EdDSA's prv2pub method to derive public key from private key
+    // This is the correct way to derive EdDSA public keys
+    console.log('[AuthService] getAuthPubKey - Using eddsa.prv2pub to derive public key');
+    const sk = F.e(skBI); // Convert to field element
+    const pk = eddsa.prv2pub(sk);
+    
+    console.log('[AuthService] getAuthPubKey - prv2pub succeeded');
+    console.log('[AuthService] getAuthPubKey - pk:', pk);
+    console.log('[AuthService] getAuthPubKey - pk[0] type:', typeof pk[0], pk[0] instanceof Uint8Array ? '(Uint8Array)' : '');
+    console.log('[AuthService] getAuthPubKey - pk[1] type:', typeof pk[1], pk[1] instanceof Uint8Array ? '(Uint8Array)' : '');
+    
+    // pk coordinates are Uint8Arrays, convert to hex
+    const pkX = pk[0] instanceof Uint8Array 
+      ? BigInt('0x' + Array.from(pk[0]).map(b => b.toString(16).padStart(2, '0')).join(''))
+      : BigInt(babyJub.F.toObject(pk[0]).toString());
+    const pkY = pk[1] instanceof Uint8Array 
+      ? BigInt('0x' + Array.from(pk[1]).map(b => b.toString(16).padStart(2, '0')).join(''))
+      : BigInt(babyJub.F.toObject(pk[1]).toString());
+    
+    const result = {
+      x: '0x' + pkX.toString(16).padStart(64, '0'),
+      y: '0x' + pkY.toString(16).padStart(64, '0'),
+    };
+    console.log('[AuthService] getAuthPubKey - result:', result);
+    return result;
+  }
 
-    // Verify authentication signature
-    async verifyAuth(ownerKey, nonce, signature, authPubKey = null) {
-        try {
-            const response = await axios.post(`${SERVER_URL}/auth/verify`, {
-                ownerKey,
-                nonce,
-                signature,
-                authPubKey,
-            });
-            return response.data;
-        } catch (error) {
-            console.error('Auth verification failed:', error);
-            throw new Error(error.response?.data?.error || 'Authentication verification failed');
-        }
-    }
+  async requestChallenge(ownerKey, authPubKey) {
+    const res = await axios.post(`${SERVER_URL}/auth/challenge`, { ownerKey, authPubKey });
+    return res.data;
+  }
 
-    // Complete authentication flow
-    async authenticate(sdk = null) {
-        try {
-            // Get or create identity
-            const identity = await this.getOrCreateIdentity(sdk);
-            
-            // Get ownerCipherPayPubKey
-            const ownerKey = await this.getOwnerCipherPayPubKey(identity);
-            
-            // Get auth pub key for new users
-            const authPubKey = await this.getAuthPubKey(identity);
-            
-            // Request challenge
-            const { nonce, expiresAt } = await this.requestChallenge(ownerKey, authPubKey);
-            
-            // Compute challenge message: Poseidon(nonce || ownerKey)
-            const nonceHex = '0x' + nonce;
-            const msgField = await poseidonHash([BigInt(nonceHex), BigInt(ownerKey)]);
-            
-            // Sign the message
-            const signature = await this.signBabyJub(msgField, identity.keypair.privKey);
-            
-            // Verify and get token
-            const result = await this.verifyAuth(ownerKey, nonce, signature, authPubKey);
-            
-            // Store token and user
-            this.setAuthToken(result.token, result.user);
-            
-            return {
-                token: result.token,
-                user: result.user,
-                identity,
-            };
-        } catch (error) {
-            console.error('Authentication failed:', error);
-            throw error;
-        }
+  async verifyAuth(ownerKey, nonce, signature, authPubKey = null) {
+    try {
+      console.log('[AuthService] Verifying auth, URL:', `${SERVER_URL}/auth/verify`);
+      const response = await axios.post(`${SERVER_URL}/auth/verify`, { ownerKey, nonce, signature, authPubKey });
+      console.log('[AuthService] Verify response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[AuthService] Auth verification failed:', error);
+      console.error('[AuthService] Verify error details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        url: error.config?.url,
+      });
+      throw new Error(error.response?.data?.error || error.message || 'Authentication verification failed');
     }
+  }
 
-    // Get current user info (requires authentication)
-    async getCurrentUser() {
-        try {
-            const axiosInstance = this.getAuthenticatedAxios();
-            const response = await axiosInstance.get('/users/me');
-            return response.data;
-        } catch (error) {
-            console.error('Failed to get current user:', error);
-            throw error;
-        }
+  async authenticate(sdk = null) {
+    try {
+      console.log('[AuthService] Starting authentication flow');
+      console.log('[AuthService] Server URL:', SERVER_URL);
+
+      const identity = await this.getOrCreateIdentity(sdk);
+      console.log('[AuthService] Identity created/retrieved');
+
+      const ownerKey = await this.getOwnerCipherPayPubKey(identity);
+      console.log('[AuthService] Owner key:', ownerKey.substring(0, 20) + '...');
+
+      console.log('[AuthService] Getting auth pub key...');
+      const authPubKey = await this.getAuthPubKey(identity);
+      console.log('[AuthService] Auth pub key retrieved:', authPubKey);
+
+      console.log('[AuthService] Requesting challenge...');
+      const { nonce } = await this.requestChallenge(ownerKey, authPubKey);
+      console.log('[AuthService] Challenge received, nonce:', String(nonce).substring(0, 16) + '...');
+
+      console.log('[AuthService] Computing message field with nonce and ownerKey...');
+      const nonceHex = String(nonce).startsWith('0x') ? String(nonce) : '0x' + String(nonce);
+      const msgField = await poseidonHash([toBigIntFlexible(nonceHex), toBigIntFlexible(ownerKey)]);
+      console.log('[AuthService] Message field computed:', msgField);
+
+      console.log('[AuthService] Signing message...');
+      console.log('[AuthService] Signing with privKey type:', typeof identity.keypair.privKey);
+      console.log('[AuthService] Signing with privKey sample:', String(identity.keypair.privKey).substring(0, 50));
+      console.log('[AuthService] Auth pubKey that will be sent:', authPubKey);
+      const signature = await this.signBabyJub(msgField, identity.keypair.privKey);
+      console.log('[AuthService] Signature generated:', signature);
+
+      console.log('[AuthService] Verifying signature with server...');
+      const res = await this.verifyAuth(ownerKey, nonce, signature, authPubKey);
+      console.log('[AuthService] Server verification response:', res);
+      
+      this.identity = normalizeIdentityKeys(this.identity); 
+      this.saveIdentity();
+      this.setAuthToken(res.token, res.user);
+      console.log('[AuthService] Authentication successful');
+      return true;
+    } catch (error) {
+      console.error('[AuthService] Authentication failed:', error);
+      console.error('[AuthService] Error type:', typeof error, error?.constructor?.name);
+      console.error('[AuthService] Error message:', error?.message);
+      console.error('[AuthService] Error stack:', error?.stack);
+      throw error;
     }
+  }
+
+  async getMe() {
+    try {
+      const axiosInstance = this.getAuthenticatedAxios();
+      const response = await axiosInstance.get('/users/me');
+      return response.data;
+    } catch (error) {
+      console.error('Failed to get current user:', error);
+      throw error;
+    }
+  }
 }
 
 const authService = new AuthService();
 export default authService;
-

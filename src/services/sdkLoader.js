@@ -10,9 +10,9 @@ export async function loadSDK() {
     sdkInitPromise = (async () => {
         // Check if we're in a browser environment and if the SDK should be used
         console.log('🔍 SDK Loader: Checking environment...');
-        console.log('REACT_APP_USE_REAL_SDK:', process.env.REACT_APP_USE_REAL_SDK);
+        console.log('VITE_USE_REAL_SDK:', import.meta.env.VITE_USE_REAL_SDK);
 
-        if (process.env.REACT_APP_USE_REAL_SDK !== 'true') {
+        if (import.meta.env.VITE_USE_REAL_SDK !== 'true') {
             console.log('❌ Real SDK disabled, using mock components');
             sdkInitialized = false;
             ChainType = { ethereum: 'ethereum', solana: 'solana' };

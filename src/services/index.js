@@ -7,13 +7,13 @@ import fallbackCipherPayService, { FallbackCipherPayService } from './FallbackCi
 // Determine which service to use based on environment variables
 const getServiceType = () => {
     // Check if we should use the fallback service
-    if (process.env.REACT_APP_USE_FALLBACK_SERVICE === 'true') {
+    if (import.meta.env.VITE_USE_FALLBACK_SERVICE === 'true') {
         console.log('🔧 Using FallbackCipherPayService (development/fallback mode)');
         return 'fallback';
     }
 
     // Check if we should use the real SDK
-    if (process.env.REACT_APP_USE_REAL_SDK === 'true') {
+    if (import.meta.env.VITE_USE_REAL_SDK === 'true') {
         console.log('🚀 Using CipherPayService (real SDK mode)');
         return 'real';
     }
