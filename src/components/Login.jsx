@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
 
 function Login() {
   const [isConnecting, setIsConnecting] = useState(false);
   const navigate = useNavigate();
+  const hasNavigated = useRef(false);
 
   const {
     isInitialized,
@@ -19,10 +20,23 @@ function Login() {
 
   // Redirect to dashboard if already authenticated
   useEffect(() => {
-    if (isAuthenticated) {
-      navigate('/dashboard');
+    // Only navigate if authenticated and haven't navigated yet
+    if (isAuthenticated && !hasNavigated.current) {
+      hasNavigated.current = true;
+      // Check current pathname to avoid unnecessary navigation
+      const currentPath = window.location.pathname;
+      if (currentPath !== '/dashboard') {
+        // Use requestAnimationFrame to defer navigation until after render
+        requestAnimationFrame(() => {
+          navigate('/dashboard', { replace: true });
+        });
+      }
     }
-  }, [isAuthenticated, navigate]);
+    // Reset navigation flag if user logs out
+    if (!isAuthenticated) {
+      hasNavigated.current = false;
+    }
+  }, [isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleWalletConnect = async (e) => {
     e.preventDefault();

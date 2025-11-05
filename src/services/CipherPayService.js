@@ -52,7 +52,11 @@ class CipherPayService {
             const { CipherPaySDK, ChainType, sdkInitialized } = await loadSDK();
 
             if (!sdkInitialized || !CipherPaySDK) {
-                throw new Error('CipherPay SDK not available in global scope');
+                // Check if SDK exists but is not a constructor
+                if (typeof window !== 'undefined' && typeof window.CipherPaySDK !== 'undefined') {
+                    throw new Error('CipherPaySDK found in global scope but is not a constructor class. The SDK appears to export utility functions only. Please use FallbackCipherPayService by setting VITE_USE_FALLBACK_SERVICE=true or VITE_USE_REAL_SDK=false');
+                }
+                throw new Error('CipherPay SDK not available in global scope. Ensure the SDK bundle is loaded via script tag in index.html');
             }
 
             // Configure circuit files for browser compatibility

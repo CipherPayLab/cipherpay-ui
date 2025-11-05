@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
 import SolanaStatus from './SolanaStatus';
@@ -32,20 +32,33 @@ function Dashboard() {
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawRecipient, setWithdrawRecipient] = useState('');
 
+  const hasRedirected = useRef(false);
+  const hasRefreshed = useRef(false);
+
   useEffect(() => {
-    if (!isInitialized) {
-      navigate('/');
+    if (!isInitialized && !hasRedirected.current) {
+      hasRedirected.current = true;
+      navigate('/', { replace: true });
       return;
     }
 
-    if (!isConnected) {
-      navigate('/');
+    if (!isConnected && !hasRedirected.current) {
+      hasRedirected.current = true;
+      navigate('/', { replace: true });
       return;
     }
 
-    // Refresh data when component mounts
-    refreshData();
-  }, [isInitialized, isConnected, navigate, refreshData]);
+    // Reset redirect flag if both conditions are met
+    if (isInitialized && isConnected) {
+      hasRedirected.current = false;
+    }
+
+    // Refresh data once when component mounts and is ready
+    if (isInitialized && isConnected && !hasRefreshed.current) {
+      hasRefreshed.current = true;
+      refreshData();
+    }
+  }, [isInitialized, isConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDisconnect = async () => {
     try {

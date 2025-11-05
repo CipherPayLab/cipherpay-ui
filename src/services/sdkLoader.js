@@ -40,21 +40,42 @@ export async function loadSDK() {
             // Check if SDK is available in global scope
             if (typeof window.CipherPaySDK !== 'undefined') {
                 console.log('✅ CipherPay SDK found in global scope!');
-                CipherPaySDK = window.CipherPaySDK;
-                ChainType = { ethereum: 'ethereum', solana: 'solana' };
-                sdkInitialized = true;
+                const sdkGlobal = window.CipherPaySDK;
+                
+                // Check what type of object it is
+                console.log('🔍 SDK type:', typeof sdkGlobal);
+                console.log('🔍 SDK is constructor?', typeof sdkGlobal === 'function' && sdkGlobal.prototype && sdkGlobal.prototype.constructor === sdkGlobal);
+                console.log('🔍 SDK keys:', Object.keys(sdkGlobal || {}));
+                
+                // Check if it's a constructor (class/function that can be instantiated)
+                const isConstructor = typeof sdkGlobal === 'function' && 
+                                     (sdkGlobal.prototype && sdkGlobal.prototype.constructor === sdkGlobal);
+                
+                if (isConstructor) {
+                    CipherPaySDK = sdkGlobal;
+                    ChainType = { ethereum: 'ethereum', solana: 'solana' };
+                    sdkInitialized = true;
 
-                // Test creating an instance
-                try {
-                    const testInstance = new CipherPaySDK({
-                        chainType: 'solana',
-                        rpcUrl: 'http://localhost:8899'
-                    });
-                    console.log('✅ SDK instance created successfully');
-                    return { CipherPaySDK, ChainType, sdkInitialized };
-                } catch (error) {
-                    console.error('❌ Failed to create SDK instance:', error);
+                    // Test creating an instance
+                    try {
+                        const testInstance = new CipherPaySDK({
+                            chainType: 'solana',
+                            rpcUrl: 'http://localhost:8899'
+                        });
+                        console.log('✅ SDK instance created successfully');
+                        return { CipherPaySDK, ChainType, sdkInitialized };
+                    } catch (error) {
+                        console.error('❌ Failed to create SDK instance:', error);
+                        sdkInitialized = false;
+                        return { CipherPaySDK: null, ChainType, sdkInitialized };
+                    }
+                } else {
+                    // SDK exists but is not a constructor - it's likely just utility functions
+                    console.log('⚠️ CipherPaySDK found but is not a constructor (likely utility functions only)');
+                    console.log('📦 SDK exports:', Object.keys(sdkGlobal || {}));
+                    console.log('🔄 SDK structure does not match expected CipherPaySDK class, falling back to mock components');
                     sdkInitialized = false;
+                    ChainType = { ethereum: 'ethereum', solana: 'solana' };
                     return { CipherPaySDK: null, ChainType, sdkInitialized };
                 }
             }
