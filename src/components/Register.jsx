@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
+import WalletSelector from './WalletSelector';
 
 function Register() {
   const navigate = useNavigate();
@@ -16,9 +17,10 @@ function Register() {
     clearError
   } = useCipherPay();
 
-  const [registrationStep, setRegistrationStep] = useState('form'); // form, authenticating, deposit, success
+  const [registrationStep, setRegistrationStep] = useState('form'); // form, wallet-selection, authenticating, deposit, success
   const [depositAmount, setDepositAmount] = useState('');
   const [depositHash, setDepositHash] = useState('');
+  const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -26,18 +28,40 @@ function Register() {
     }
   }, [isAuthenticated]);
 
-  const handleSignUp = async (e) => {
+  const handleSignUp = (e) => {
     e.preventDefault();
+    if (!isInitialized) {
+      alert('CipherPay service is still initializing. Please wait...');
+      return;
+    }
+    // Show wallet selection UI
+    setRegistrationStep('wallet-selection');
+    clearError();
+  };
+
+  const handleWalletConnect = () => {
+    if (!isInitialized) {
+      alert('CipherPay service is still initializing. Please wait...');
+      return;
+    }
+    // Show wallet selection UI
+    setRegistrationStep('wallet-selection');
+    clearError();
+  };
+
+  // Handle wallet connection from WalletSelector
+  const handleWalletConnected = async (walletAddress) => {
     if (!isInitialized) {
       alert('CipherPay service is still initializing. Please wait...');
       return;
     }
 
     try {
+      setIsConnecting(true);
       setRegistrationStep('authenticating');
       clearError();
       
-      // Connect wallet if not connected
+      // Connect wallet to CipherPay service using the selected wallet address
       if (!isConnected) {
         await connectWallet();
       }
@@ -47,32 +71,17 @@ function Register() {
       // After successful signup, move to deposit step
       // The useEffect will handle this via isAuthenticated
     } catch (err) {
-      console.error('Sign up failed:', err);
-      alert(`Sign up failed: ${err.message || 'Unknown error'}`);
-      setRegistrationStep('form');
+      console.error('Failed to connect wallet and sign up:', err);
+      alert(`Registration failed: ${err.message || 'Unknown error'}`);
+      setRegistrationStep('wallet-selection');
+    } finally {
+      setIsConnecting(false);
     }
   };
 
-  const handleWalletConnect = async () => {
-    if (!isInitialized) {
-      alert('CipherPay service is still initializing. Please wait...');
-      return;
-    }
-
-    try {
-      setRegistrationStep('authenticating');
-      clearError();
-      
-      // Connect wallet
-      await connectWallet();
-      
-      // Sign up and authenticate
-      await signUp();
-    } catch (err) {
-      console.error('Failed to connect wallet and sign up:', err);
-      alert(`Registration failed: ${err.message || 'Unknown error'}`);
-      setRegistrationStep('form');
-    }
+  const handleWalletDisconnected = () => {
+    // Wallet disconnected - clear any errors
+    clearError();
   };
 
   const handleDeposit = async (e) => {
@@ -192,6 +201,29 @@ function Register() {
               <a href="/" className="font-medium text-indigo-600 hover:text-indigo-500">
                 Already have an account? Sign in
               </a>
+            </div>
+          </div>
+        )}
+
+        {/* Wallet Selection Step */}
+        {registrationStep === 'wallet-selection' && (
+          <div className="mt-8 space-y-6">
+            <div>
+              <p className="text-sm text-gray-600 text-center mb-4">
+                Select a wallet to create your CipherPay account
+              </p>
+            </div>
+            <WalletSelector
+              onWalletConnected={handleWalletConnected}
+              onWalletDisconnected={handleWalletDisconnected}
+            />
+            <div className="text-center">
+              <button
+                onClick={() => setRegistrationStep('form')}
+                className="text-sm text-gray-600 hover:text-gray-900"
+              >
+                ← Back
+              </button>
             </div>
           </div>
         )}
