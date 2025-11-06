@@ -18,8 +18,13 @@ function WalletSelector({ onWalletConnected, onWalletDisconnected }) {
   }, [connected, publicKey, onWalletConnected]);
 
   useEffect(() => {
-    if (!connected && onWalletDisconnected) {
-      onWalletDisconnected();
+    if (!connected) {
+      // Reset the previous connection ref when disconnected
+      // This ensures the UI updates correctly and allows reconnection detection
+      prevConnectedRef.current = false;
+      if (onWalletDisconnected) {
+        onWalletDisconnected();
+      }
     }
   }, [connected, onWalletDisconnected]);
 

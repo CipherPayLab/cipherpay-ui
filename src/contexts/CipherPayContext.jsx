@@ -15,7 +15,7 @@ export const useCipherPay = () => {
 
 export const CipherPayProvider = ({ children }) => {
     // Get Solana wallet adapter state
-    const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet } = useWallet();
+    const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect } = useWallet();
     
     const [isInitialized, setIsInitialized] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
@@ -141,6 +141,21 @@ export const CipherPayProvider = ({ children }) => {
             setLoading(true);
             setError(null);
             
+            // Check if user just disconnected - don't auto-connect in this case
+            try {
+                const justDisconnected = sessionStorage.getItem('cipherpay_just_disconnected');
+                if (justDisconnected === '1') {
+                    console.log('[CipherPayContext] User just disconnected, skipping auto-connection');
+                    // Clear the flag after a short delay to allow manual reconnection
+                    setTimeout(() => {
+                        sessionStorage.removeItem('cipherpay_just_disconnected');
+                    }, 1000);
+                    return null;
+                }
+            } catch (e) {
+                // Ignore sessionStorage errors
+            }
+            
             // If Solana wallet is connected, use its address
             if (solanaConnected && solanaPublicKey) {
                 const address = solanaPublicKey.toBase58();
@@ -198,6 +213,19 @@ export const CipherPayProvider = ({ children }) => {
             } catch (e) {
                 console.warn('[CipherPayContext] Unable to clear persisted auth token', e);
             }
+            
+            // Disconnect from Solana wallet adapter first
+            if (solanaDisconnect) {
+                try {
+                    await solanaDisconnect();
+                    console.log('[CipherPayContext] Disconnected from Solana wallet adapter');
+                } catch (err) {
+                    console.warn('[CipherPayContext] Error disconnecting from Solana wallet adapter:', err);
+                    // Continue with disconnect even if Solana adapter disconnect fails
+                }
+            }
+            
+            // Disconnect from CipherPay service
             await cipherPayService.disconnectWallet();
             setIsConnected(false);
             setPublicAddress(null);
