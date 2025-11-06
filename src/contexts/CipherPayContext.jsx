@@ -146,9 +146,12 @@ export const CipherPayProvider = ({ children }) => {
                 const address = solanaPublicKey.toBase58();
                 console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', address);
                 
-                // Set wallet address in service if method exists
                 if (cipherPayService.setWalletAddress) {
                     cipherPayService.setWalletAddress(address);
+                    // Ensure service internal connection flag is set as well
+                    if (cipherPayService.connectWallet) {
+                        await cipherPayService.connectWallet(address);
+                    }
                 } else {
                     // Fallback: try to connect through service with wallet address
                     await cipherPayService.connectWallet(address);
@@ -188,9 +191,18 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
+            // Explicitly clear any persisted auth/session first to avoid immediate re-login loops
+            try {
+                localStorage.removeItem('cipherpay_auth_token');
+                sessionStorage.setItem('cipherpay_just_disconnected', '1');
+            } catch (e) {
+                console.warn('[CipherPayContext] Unable to clear persisted auth token', e);
+            }
             await cipherPayService.disconnectWallet();
             setIsConnected(false);
             setPublicAddress(null);
+            setAuthUser(null);
+            setIsAuthenticated(false);
             await updateServiceStatus();
         } catch (err) {
             setError(err.message);

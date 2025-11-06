@@ -1,15 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 
 function WalletSelector({ onWalletConnected, onWalletDisconnected }) {
   const { publicKey, connected, disconnect, wallet, wallets, select, connecting, connect } = useWallet();
   const [showWalletList, setShowWalletList] = useState(false);
+  const prevConnectedRef = useRef(false); // Track previous connection state
 
   useEffect(() => {
-    if (connected && publicKey && onWalletConnected) {
+    // Only call onWalletConnected when connection changes from false to true
+    // This prevents auto-authentication when user navigates to login with already-connected wallet
+    if (connected && publicKey && onWalletConnected && !prevConnectedRef.current) {
       onWalletConnected(publicKey.toBase58());
     }
+    // Update the previous connection state
+    prevConnectedRef.current = connected;
   }, [connected, publicKey, onWalletConnected]);
 
   useEffect(() => {

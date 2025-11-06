@@ -60,7 +60,21 @@ function Login() {
       alert('CipherPay service is still initializing. Please wait...');
       return;
     }
-
+    
+    // Check if user just disconnected - don't auto-authenticate in this case
+    // This prevents redirect loop when user disconnects and lands on login page
+    try {
+      const justDisconnected = sessionStorage.getItem('cipherpay_just_disconnected');
+      if (justDisconnected === '1') {
+        console.log('[Login] User just disconnected, skipping auto-authentication');
+        sessionStorage.removeItem('cipherpay_just_disconnected');
+        // Don't auto-authenticate - let user manually click "Connect" button
+        return;
+      }
+    } catch (e) {
+      // Ignore sessionStorage errors
+    }
+    
     try {
       setIsConnecting(true);
       clearError();

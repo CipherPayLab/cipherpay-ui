@@ -54,17 +54,23 @@ class MockWalletProvider {
 
     async disconnect() {
         this.connected = false;
-        // Don't clear the address - keep it for next connection
-        // this.address = null;
+        // Clear the address so the app truly treats us as disconnected
+        this.address = null;
+        if (typeof window !== 'undefined' && window.localStorage) {
+            localStorage.removeItem(this.storageKey);
+        }
     }
 
     getPublicAddress() {
-        return this.address;
+        // If not connected, do not expose an address
+        return this.connected ? this.address : null;
     }
 
     // Method to manually set/change wallet address (for testing multiple wallets)
     setWalletAddress(address) {
         this.address = address;
+        // Keep internal connection state in sync when address is set manually
+        this.connected = !!address;
         if (typeof window !== 'undefined' && window.localStorage) {
             if (address) {
                 localStorage.setItem(this.storageKey, address);
@@ -318,13 +324,22 @@ class FallbackCipherPayService {
     async disconnectWallet() {
         if (this.useRealSDK && this.sdk) {
             try {
-                await this.sdk.disconnectWallet();
+                if (typeof this.sdk.disconnectWallet === 'function') {
+                    await this.sdk.disconnectWallet();
+                } else {
+                    // Fallback if SDK lacks explicit disconnect
+                    this.useRealSDK = false;
+                    await this.walletProvider.disconnect();
+                }
+                // Ensure local mock state is clean
+                this.walletProvider?.setWalletAddress?.(null);
             } catch (error) {
                 console.error('Failed to disconnect wallet via SDK:', error);
                 throw error;
             }
         } else if (this.walletProvider) {
             await this.walletProvider.disconnect();
+            this.walletProvider.setWalletAddress?.(null);
         }
     }
 
@@ -680,17 +695,21 @@ class FallbackCipherPayService {
 
     // Utility Methods
     isConnected() {
+        // Must be connected **and** have a current address
         if (this.useRealSDK && this.sdk) {
-            return this.sdk.walletProvider && this.getPublicAddress() !== null;
+            const hasAddr = this.getPublicAddress() !== null;
+            // Prefer explicit flag if the SDK exposes one; otherwise rely on address + provider
+            return (!!this.sdk.walletProvider) && hasAddr;
         }
-        return this.walletProvider && this.getPublicAddress() !== null;
+        return (!!this.walletProvider?.connected) && (this.getPublicAddress() !== null);
     }
 
     getServiceStatus() {
+        const connected = this.isConnected();
         return {
             isInitialized: this.isInitialized,
-            isConnected: this.isConnected(),
-            publicAddress: this.getPublicAddress(),
+            isConnected: connected,
+            publicAddress: connected ? this.getPublicAddress() : null,
             balance: this.getBalance(),
             spendableNotes: this.getSpendableNotes().length,
             totalNotes: this.getAllNotes().length,
