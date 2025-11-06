@@ -44,10 +44,11 @@ function Dashboard() {
       // The flag only prevents multiple redirects during the same render cycle
       if (!hasRedirected.current) {
         hasRedirected.current = true;
-        // Use requestAnimationFrame to defer navigation and avoid throttling
-        requestAnimationFrame(() => {
+        // Use setTimeout with 0 delay instead of requestAnimationFrame to avoid throttling
+        const timeoutId = setTimeout(() => {
           navigate('/', { replace: true });
-        });
+        }, 0);
+        return () => clearTimeout(timeoutId);
       }
       return;
     }

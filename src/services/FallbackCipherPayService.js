@@ -24,21 +24,54 @@ class MockWalletProvider {
     constructor() {
         this.connected = false;
         this.address = null;
+        // Use localStorage to persist wallet address across sessions
+        this.storageKey = 'cipherpay_mock_wallet_address';
+        this.loadPersistedAddress();
+    }
+
+    loadPersistedAddress() {
+        // Load persisted address from localStorage if available
+        if (typeof window !== 'undefined' && window.localStorage) {
+            const persisted = localStorage.getItem(this.storageKey);
+            if (persisted) {
+                this.address = persisted;
+            }
+        }
     }
 
     async connect() {
         this.connected = true;
-        this.address = '0x' + Math.random().toString(16).substr(2, 40);
+        // If no address exists, generate one and persist it
+        if (!this.address) {
+            this.address = '0x' + Math.random().toString(16).substr(2, 40);
+            // Persist the address to localStorage so it stays consistent
+            if (typeof window !== 'undefined' && window.localStorage) {
+                localStorage.setItem(this.storageKey, this.address);
+            }
+        }
         return this.address;
     }
 
     async disconnect() {
         this.connected = false;
-        this.address = null;
+        // Don't clear the address - keep it for next connection
+        // this.address = null;
     }
 
     getPublicAddress() {
         return this.address;
+    }
+
+    // Method to manually set/change wallet address (for testing multiple wallets)
+    setWalletAddress(address) {
+        this.address = address;
+        if (typeof window !== 'undefined' && window.localStorage) {
+            if (address) {
+                localStorage.setItem(this.storageKey, address);
+            } else {
+                localStorage.removeItem(this.storageKey);
+            }
+        }
     }
 
     async signAndSendDepositTx(to, value) {
@@ -251,7 +284,7 @@ class FallbackCipherPayService {
     }
 
     // Wallet Management
-    async connectWallet() {
+    async connectWallet(address = null) {
         if (!this.isInitialized) await this.initialize();
 
         if (this.useRealSDK && this.sdk) {
@@ -264,8 +297,21 @@ class FallbackCipherPayService {
                 throw error;
             }
         } else {
+            // If address is provided (from Solana wallet adapter), set it directly
+            if (address && this.walletProvider) {
+                this.walletProvider.setWalletAddress(address);
+                return address;
+            }
+            // Otherwise, use the mock wallet provider's connect
             await this.walletProvider.connect();
             return this.walletProvider.getPublicAddress();
+        }
+    }
+
+    // Set wallet address directly (for Solana wallet adapter integration)
+    setWalletAddress(address) {
+        if (this.walletProvider && typeof this.walletProvider.setWalletAddress === 'function') {
+            this.walletProvider.setWalletAddress(address);
         }
     }
 
