@@ -22,10 +22,10 @@ class CipherPayService {
         this.isInitialized = false;
         this.config = {
             chainType: 'solana', // Use string instead of ChainType enum
-            rpcUrl: process.env.REACT_APP_RPC_URL || 'http://127.0.0.1:8899',
-            relayerUrl: process.env.REACT_APP_RELAYER_URL || 'http://localhost:3000',
-            relayerApiKey: process.env.REACT_APP_RELAYER_API_KEY,
-            contractAddress: process.env.REACT_APP_CONTRACT_ADDRESS,
+            rpcUrl: import.meta.env.VITE_RPC_URL || 'http://127.0.0.1:8899',
+            relayerUrl: import.meta.env.VITE_RELAYER_URL || 'http://localhost:3000',
+            relayerApiKey: import.meta.env.VITE_RELAYER_API_KEY,
+            contractAddress: import.meta.env.VITE_CONTRACT_ADDRESS,
             programId: 'XeEs3gHZGdDhs3Lm1VoukrWrEnjdC3CA5VRtowN5MGz', // Solana program ID
             enableCompliance: true,
             enableCaching: true,
@@ -36,9 +36,9 @@ class CipherPayService {
             },
             // Add authentication configuration for relayer
             auth: {
-                email: process.env.REACT_APP_RELAYER_EMAIL,
-                password: process.env.REACT_APP_RELAYER_PASSWORD,
-                apiKey: process.env.REACT_APP_RELAYER_API_KEY
+                email: import.meta.env.VITE_RELAYER_EMAIL,
+                password: import.meta.env.VITE_RELAYER_PASSWORD,
+                apiKey: import.meta.env.VITE_RELAYER_API_KEY
             }
         };
         console.log('CipherPayService constructor - config:', this.config);
@@ -52,20 +52,24 @@ class CipherPayService {
             const { CipherPaySDK, ChainType, sdkInitialized } = await loadSDK();
 
             if (!sdkInitialized || !CipherPaySDK) {
-                throw new Error('CipherPay SDK not available in global scope');
+                // Check if SDK exists but is not a constructor
+                if (typeof window !== 'undefined' && typeof window.CipherPaySDK !== 'undefined') {
+                    throw new Error('CipherPaySDK found in global scope but is not a constructor class. The SDK appears to export utility functions only. Please use FallbackCipherPayService by setting VITE_USE_FALLBACK_SERVICE=true or VITE_USE_REAL_SDK=false');
+                }
+                throw new Error('CipherPay SDK not available in global scope. Ensure the SDK bundle is loaded via script tag in index.html');
             }
 
             // Configure circuit files for browser compatibility
             const circuitConfig = {
                 transfer: {
-                    wasmUrl: process.env.REACT_APP_TRANSFER_WASM_URL || '/circuits/transfer.wasm',
-                    zkeyUrl: process.env.REACT_APP_TRANSFER_ZKEY_URL || '/circuits/transfer.zkey',
-                    verificationKeyUrl: process.env.REACT_APP_TRANSFER_VKEY_URL || '/circuits/verifier-transfer.json'
+                    wasmUrl: import.meta.env.VITE_TRANSFER_WASM_URL || '/circuits/transfer.wasm',
+                    zkeyUrl: import.meta.env.VITE_TRANSFER_ZKEY_URL || '/circuits/transfer.zkey',
+                    verificationKeyUrl: import.meta.env.VITE_TRANSFER_VKEY_URL || '/circuits/verifier-transfer.json'
                 },
                 merkle: {
-                    wasmUrl: process.env.REACT_APP_MERKLE_WASM_URL || '/circuits/merkle.wasm',
-                    zkeyUrl: process.env.REACT_APP_MERKLE_ZKEY_URL || '/circuits/merkle.zkey',
-                    verificationKeyUrl: process.env.REACT_APP_MERKLE_VKEY_URL || '/circuits/verifier-merkle.json'
+                    wasmUrl: import.meta.env.VITE_MERKLE_WASM_URL || '/circuits/merkle.wasm',
+                    zkeyUrl: import.meta.env.VITE_MERKLE_ZKEY_URL || '/circuits/merkle.zkey',
+                    verificationKeyUrl: import.meta.env.VITE_MERKLE_VKEY_URL || '/circuits/verifier-merkle.json'
                 },
                 withdraw: {
                     wasmUrl: '/circuits/withdraw.wasm',

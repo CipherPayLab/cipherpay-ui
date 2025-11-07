@@ -1,21 +1,41 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useCipherPay } from '../contexts/CipherPayContext';
-import cipherPayService from '../services/CipherPayService';
+import cipherPayService from '../services';
+
+// Module-level flag to persist across component remounts (prevents duplicate fetches in StrictMode)
+let globalHasFetched = false;
+let globalFetchInProgress = false;
 
 function SolanaStatus() {
     const { isInitialized, error, sdk } = useCipherPay();
     const [relayerStatus, setRelayerStatus] = useState('checking');
     const [merkleRoot, setMerkleRoot] = useState(null);
     const [circuits, setCircuits] = useState([]);
+    const hasFetched = useRef(false);
+    const fetchInProgress = useRef(false);
 
     useEffect(() => {
+        // Only run once when initialized (check both component-level and module-level flags)
+        if (!isInitialized || hasFetched.current || fetchInProgress.current || globalHasFetched || globalFetchInProgress) {
+            return;
+        }
+
+        // Mark as in progress immediately to prevent duplicate calls (even in StrictMode)
+        fetchInProgress.current = true;
+        hasFetched.current = true;
+        globalFetchInProgress = true;
+        globalHasFetched = true;
+        let isMounted = true;
+
         const checkRelayerStatus = async () => {
             try {
                 // Try to use SDK service method first
-                if (isInitialized && cipherPayService.sdk?.relayerClient) {
+                if (cipherPayService.sdk?.relayerClient) {
                     try {
                         const status = await cipherPayService.sdk.relayerClient.getStatus();
-                        setRelayerStatus(status.status === 'healthy' ? 'healthy' : 'unhealthy');
+                        if (isMounted) {
+                            setRelayerStatus(status.status === 'healthy' ? 'healthy' : 'unhealthy');
+                        }
                         return;
                     } catch (sdkError) {
                         console.log('SDK relayer status failed, trying fallback:', sdkError);
@@ -24,45 +44,69 @@ function SolanaStatus() {
 
                 // Fallback to direct API call
                 const response = await fetch('http://localhost:3000/health');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    throw new Error('Response is not JSON');
+                }
                 const data = await response.json();
-                setRelayerStatus(data.status === 'healthy' ? 'healthy' : 'unhealthy');
+                if (isMounted) {
+                    setRelayerStatus(data.status === 'healthy' ? 'healthy' : 'unhealthy');
+                }
             } catch (error) {
-                console.error('Failed to check relayer status:', error);
-                setRelayerStatus('unreachable');
+                // Log error - module-level flags prevent duplicate calls
+                if (isMounted) {
+                    console.error('Failed to check relayer status:', error);
+                    setRelayerStatus('unreachable');
+                }
             }
         };
 
         const fetchMerkleRoot = async () => {
             try {
                 // Try to use SDK service method first
-                if (isInitialized) {
-                    try {
-                        const root = await cipherPayService.fetchMerkleRoot();
+                try {
+                    const root = await cipherPayService.fetchMerkleRoot();
+                    if (isMounted) {
                         setMerkleRoot(root);
-                        return;
-                    } catch (sdkError) {
-                        console.log('SDK merkle root fetch failed, trying fallback:', sdkError);
                     }
+                    return;
+                } catch (sdkError) {
+                    console.log('SDK merkle root fetch failed, trying fallback:', sdkError);
                 }
 
                 // Fallback to direct API call
                 const response = await fetch('http://localhost:3000/api/v1/merkle/root');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    throw new Error('Response is not JSON');
+                }
                 const data = await response.json();
-                if (data.success) {
+                if (data.success && isMounted) {
                     setMerkleRoot(data.root);
                 }
             } catch (error) {
-                console.error('Failed to fetch merkle root:', error);
+                // Log error - module-level flags prevent duplicate calls
+                if (isMounted) {
+                    console.error('Failed to fetch merkle root:', error);
+                }
             }
         };
 
         const fetchCircuits = async () => {
             try {
                 // Try to use SDK service method first
-                if (isInitialized && cipherPayService.sdk?.relayerClient) {
+                if (cipherPayService.sdk?.relayerClient) {
                     try {
                         const circuitsData = await cipherPayService.sdk.relayerClient.getCircuits();
-                        setCircuits(circuitsData.circuits || []);
+                        if (isMounted) {
+                            setCircuits(circuitsData.circuits || []);
+                        }
                         return;
                     } catch (sdkError) {
                         console.log('SDK circuits fetch failed, trying fallback:', sdkError);
@@ -71,21 +115,48 @@ function SolanaStatus() {
 
                 // Fallback to direct API call
                 const response = await fetch('http://localhost:3000/api/v1/circuits');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    throw new Error('Response is not JSON');
+                }
                 const data = await response.json();
-                if (data.success) {
+                if (data.success && isMounted) {
                     setCircuits(data.circuits);
                 }
             } catch (error) {
-                console.error('Failed to fetch circuits:', error);
+                // Log error - module-level flags prevent duplicate calls
+                if (isMounted) {
+                    console.error('Failed to fetch circuits:', error);
+                }
             }
         };
 
-        if (isInitialized) {
-            checkRelayerStatus();
-            fetchMerkleRoot();
-            fetchCircuits();
-        }
-    }, [isInitialized, sdk]);
+        // Run all fetches in parallel
+        Promise.all([
+            checkRelayerStatus().catch(() => {
+                // Errors are already logged in the function, just prevent unhandled rejection
+            }),
+            fetchMerkleRoot().catch(() => {
+                // Errors are already logged in the function, just prevent unhandled rejection
+            }),
+            fetchCircuits().catch(() => {
+                // Errors are already logged in the function, just prevent unhandled rejection
+            })
+        ]).finally(() => {
+            // All fetches complete - keep flags true to prevent re-fetching
+            // This prevents React StrictMode from triggering duplicate fetches
+            globalFetchInProgress = false; // Allow component to remount if needed, but keep hasFetched true
+        });
+
+        return () => {
+            isMounted = false;
+            // Don't reset fetchInProgress in cleanup - we want it to stay true
+            // to prevent re-fetching in React StrictMode double-invocation
+        };
+    }, [isInitialized]); // Removed 'sdk' from dependencies to prevent infinite loops
 
     const getStatusColor = (status) => {
         switch (status) {

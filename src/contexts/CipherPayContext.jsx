@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
 import cipherPayService from '../services';
+import authService from '../services/authService';
 
 const CipherPayContext = createContext();
 
@@ -12,6 +14,9 @@ export const useCipherPay = () => {
 };
 
 export const CipherPayProvider = ({ children }) => {
+    // Get Solana wallet adapter state
+    const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect } = useWallet();
+    
     const [isInitialized, setIsInitialized] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
     const [publicAddress, setPublicAddress] = useState(null);
@@ -21,6 +26,28 @@ export const CipherPayProvider = ({ children }) => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [sdk, setSdk] = useState(null);
+    // Don't initialize isAuthenticated from localStorage - wait for connection check
+    // This prevents false authentication state from stale tokens
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [authUser, setAuthUser] = useState(null);
+
+    // Sync Solana wallet state with CipherPay state
+    useEffect(() => {
+        if (solanaConnected && solanaPublicKey) {
+            const address = solanaPublicKey.toBase58();
+            setPublicAddress(address);
+            setIsConnected(true);
+            // Update service with wallet address
+            if (cipherPayService.isInitialized) {
+                cipherPayService.setWalletAddress?.(address);
+            }
+        } else if (!solanaConnected) {
+            // Clear wallet connection state when Solana wallet disconnects
+            console.log('[CipherPayContext] Solana wallet disconnected, clearing connection state');
+            setPublicAddress(null);
+            setIsConnected(false);
+        }
+    }, [solanaConnected, solanaPublicKey]);
 
     // Initialize the service
     useEffect(() => {
@@ -32,9 +59,34 @@ export const CipherPayProvider = ({ children }) => {
                 setIsInitialized(true);
                 setSdk(cipherPayService.sdk); // Set the SDK from the service
                 await updateServiceStatus();
+                
+                // After initialization, check service status to determine if connected
+                // Clear any stale authentication tokens if not connected
+                const status = cipherPayService.getServiceStatus();
+                const serviceConnected = status?.isConnected || false;
+                
+                if (serviceConnected && authService.isAuthenticated()) {
+                    // Only set authenticated if service shows connected
+                    setIsAuthenticated(true);
+                    setAuthUser(authService.getUser());
+                } else {
+                    // Clear any stale authentication tokens
+                    if (authService.isAuthenticated()) {
+                        console.log('[CipherPayContext] Clearing stale authentication - no active connection');
+                        authService.clearAuth();
+                    }
+                    setIsAuthenticated(false);
+                    setAuthUser(null);
+                }
             } catch (err) {
                 setError(err.message);
                 console.error('Failed to initialize CipherPay service:', err);
+                // On error, clear any stale auth
+                if (authService.isAuthenticated()) {
+                    authService.clearAuth();
+                }
+                setIsAuthenticated(false);
+                setAuthUser(null);
             } finally {
                 setLoading(false);
             }
@@ -88,11 +140,49 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
-            const address = await cipherPayService.connectWallet();
-            console.log('[CipherPayContext] connectWallet: SDK returned address:', address);
-            setPublicAddress(address);
-            setIsConnected(true);
-            console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+            
+            // Check if user just disconnected - don't auto-connect in this case
+            try {
+                const justDisconnected = sessionStorage.getItem('cipherpay_just_disconnected');
+                if (justDisconnected === '1') {
+                    console.log('[CipherPayContext] User just disconnected, skipping auto-connection');
+                    // Clear the flag after a short delay to allow manual reconnection
+                    setTimeout(() => {
+                        sessionStorage.removeItem('cipherpay_just_disconnected');
+                    }, 1000);
+                    return null;
+                }
+            } catch (e) {
+                // Ignore sessionStorage errors
+            }
+            
+            // If Solana wallet is connected, use its address
+            if (solanaConnected && solanaPublicKey) {
+                const address = solanaPublicKey.toBase58();
+                console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', address);
+                
+                if (cipherPayService.setWalletAddress) {
+                    cipherPayService.setWalletAddress(address);
+                    // Ensure service internal connection flag is set as well
+                    if (cipherPayService.connectWallet) {
+                        await cipherPayService.connectWallet(address);
+                    }
+                } else {
+                    // Fallback: try to connect through service with wallet address
+                    await cipherPayService.connectWallet(address);
+                }
+                
+                setPublicAddress(address);
+                setIsConnected(true);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+            } else {
+                // Fallback to service's connectWallet (for mock or SDK)
+                const address = await cipherPayService.connectWallet();
+                console.log('[CipherPayContext] connectWallet: SDK returned address:', address);
+                setPublicAddress(address);
+                setIsConnected(true);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+            }
 
             // Add a small delay to ensure service state is updated
             console.log('[CipherPayContext] connectWallet: Waiting 100ms for service state to update...');
@@ -101,7 +191,7 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] connectWallet: About to call updateServiceStatus...');
             await updateServiceStatus();
             console.log('[CipherPayContext] connectWallet: updateServiceStatus completed');
-            return address;
+            return publicAddress || solanaPublicKey?.toBase58();
         } catch (err) {
             console.error('[CipherPayContext] connectWallet: Error occurred:', err);
             setError(err.message);
@@ -116,9 +206,31 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
+            // Explicitly clear any persisted auth/session first to avoid immediate re-login loops
+            try {
+                localStorage.removeItem('cipherpay_auth_token');
+                sessionStorage.setItem('cipherpay_just_disconnected', '1');
+            } catch (e) {
+                console.warn('[CipherPayContext] Unable to clear persisted auth token', e);
+            }
+            
+            // Disconnect from Solana wallet adapter first
+            if (solanaDisconnect) {
+                try {
+                    await solanaDisconnect();
+                    console.log('[CipherPayContext] Disconnected from Solana wallet adapter');
+                } catch (err) {
+                    console.warn('[CipherPayContext] Error disconnecting from Solana wallet adapter:', err);
+                    // Continue with disconnect even if Solana adapter disconnect fails
+                }
+            }
+            
+            // Disconnect from CipherPay service
             await cipherPayService.disconnectWallet();
             setIsConnected(false);
             setPublicAddress(null);
+            setAuthUser(null);
+            setIsAuthenticated(false);
             await updateServiceStatus();
         } catch (err) {
             setError(err.message);
@@ -277,6 +389,77 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
+    // Authentication Management
+    const signIn = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            const result = await authService.authenticate(sdk);
+            setIsAuthenticated(true);
+            setAuthUser(result.user);
+            return result;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const signUp = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            // Sign up is the same as sign in - server creates user on first challenge
+            const result = await authService.authenticate(sdk);
+            setIsAuthenticated(true);
+            setAuthUser(result.user);
+            return result;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const signOut = async () => {
+        try {
+            authService.clearAuth();
+            setIsAuthenticated(false);
+            setAuthUser(null);
+            await disconnectWallet();
+        } catch (err) {
+            console.error('Sign out error:', err);
+            // Clear auth even if wallet disconnect fails
+            setIsAuthenticated(false);
+            setAuthUser(null);
+        }
+    };
+
+    // Sync authentication state with connection state
+    // IMPORTANT: Only clear auth when disconnected, don't auto-set from stored tokens
+    // This prevents auto-redirect to dashboard when user navigates back to login
+    useEffect(() => {
+        if (isInitialized) {
+            const hasValidToken = authService.isAuthenticated();
+            
+            // Only manage authentication state when disconnected
+            if (!isConnected) {
+                // Always clear authentication when not connected
+                console.log('[CipherPayContext] Clearing authentication - no active connection');
+                if (hasValidToken) {
+                    authService.clearAuth();
+                }
+                setIsAuthenticated(false);
+                setAuthUser(null);
+            }
+            // If connected but not authenticated, don't auto-authenticate from token
+            // User must explicitly call signIn() for authentication
+            // This allows users to navigate to login page without being redirected
+        }
+    }, [isInitialized, isConnected]);
+
     // Utility functions
     const refreshData = useCallback(() => {
         updateServiceStatus();
@@ -297,10 +480,17 @@ export const CipherPayProvider = ({ children }) => {
         loading,
         error,
         sdk,
+        isAuthenticated,
+        authUser,
 
         // Wallet Management
         connectWallet,
         disconnectWallet,
+
+        // Authentication
+        signIn,
+        signUp,
+        signOut,
 
         // Transfer Management
         createTransfer,

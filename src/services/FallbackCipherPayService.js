@@ -24,21 +24,60 @@ class MockWalletProvider {
     constructor() {
         this.connected = false;
         this.address = null;
+        // Use localStorage to persist wallet address across sessions
+        this.storageKey = 'cipherpay_mock_wallet_address';
+        this.loadPersistedAddress();
+    }
+
+    loadPersistedAddress() {
+        // Load persisted address from localStorage if available
+        if (typeof window !== 'undefined' && window.localStorage) {
+            const persisted = localStorage.getItem(this.storageKey);
+            if (persisted) {
+                this.address = persisted;
+            }
+        }
     }
 
     async connect() {
         this.connected = true;
-        this.address = '0x' + Math.random().toString(16).substr(2, 40);
+        // If no address exists, generate one and persist it
+        if (!this.address) {
+            this.address = '0x' + Math.random().toString(16).substr(2, 40);
+            // Persist the address to localStorage so it stays consistent
+            if (typeof window !== 'undefined' && window.localStorage) {
+                localStorage.setItem(this.storageKey, this.address);
+            }
+        }
         return this.address;
     }
 
     async disconnect() {
         this.connected = false;
+        // Clear the address so the app truly treats us as disconnected
         this.address = null;
+        if (typeof window !== 'undefined' && window.localStorage) {
+            localStorage.removeItem(this.storageKey);
+        }
     }
 
     getPublicAddress() {
-        return this.address;
+        // If not connected, do not expose an address
+        return this.connected ? this.address : null;
+    }
+
+    // Method to manually set/change wallet address (for testing multiple wallets)
+    setWalletAddress(address) {
+        this.address = address;
+        // Keep internal connection state in sync when address is set manually
+        this.connected = !!address;
+        if (typeof window !== 'undefined' && window.localStorage) {
+            if (address) {
+                localStorage.setItem(this.storageKey, address);
+            } else {
+                localStorage.removeItem(this.storageKey);
+            }
+        }
     }
 
     async signAndSendDepositTx(to, value) {
@@ -155,18 +194,18 @@ class FallbackCipherPayService {
         this.merkleTreeClient = null;
         this.isInitialized = false;
         this.sdk = null;
-        this.useRealSDK = process.env.REACT_APP_USE_REAL_SDK === 'true';
+        this.useRealSDK = import.meta.env.VITE_USE_REAL_SDK === 'true';
         this.config = {
             chainType: 'solana', // Default to Solana for end-to-end testing
-            rpcUrl: process.env.REACT_APP_RPC_URL || 'http://127.0.0.1:8899', // Local Solana validator
-            relayerUrl: process.env.REACT_APP_RELAYER_URL || 'http://localhost:3000', // Local Solana relayer
-            programId: process.env.REACT_APP_PROGRAM_ID, // Solana program ID
-            enableCompliance: process.env.REACT_APP_ENABLE_COMPLIANCE !== 'false',
-            enableCaching: process.env.REACT_APP_ENABLE_CACHING !== 'false',
-            enableStealthAddresses: process.env.REACT_APP_ENABLE_STEALTH_ADDRESSES !== 'false',
+            rpcUrl: import.meta.env.VITE_RPC_URL || 'http://127.0.0.1:8899', // Local Solana validator
+            relayerUrl: import.meta.env.VITE_RELAYER_URL || 'http://localhost:3000', // Local Solana relayer
+            programId: import.meta.env.VITE_PROGRAM_ID, // Solana program ID
+            enableCompliance: import.meta.env.VITE_ENABLE_COMPLIANCE !== 'false',
+            enableCaching: import.meta.env.VITE_ENABLE_CACHING !== 'false',
+            enableStealthAddresses: import.meta.env.VITE_ENABLE_STEALTH_ADDRESSES !== 'false',
             cacheConfig: {
-                maxSize: parseInt(process.env.REACT_APP_CACHE_MAX_SIZE) || 1000,
-                defaultTTL: parseInt(process.env.REACT_APP_CACHE_DEFAULT_TTL) || 300000
+                maxSize: parseInt(import.meta.env.VITE_CACHE_MAX_SIZE) || 1000,
+                defaultTTL: parseInt(import.meta.env.VITE_CACHE_DEFAULT_TTL) || 300000
             }
         };
     }
@@ -251,7 +290,7 @@ class FallbackCipherPayService {
     }
 
     // Wallet Management
-    async connectWallet() {
+    async connectWallet(address = null) {
         if (!this.isInitialized) await this.initialize();
 
         if (this.useRealSDK && this.sdk) {
@@ -264,21 +303,43 @@ class FallbackCipherPayService {
                 throw error;
             }
         } else {
+            // If address is provided (from Solana wallet adapter), set it directly
+            if (address && this.walletProvider) {
+                this.walletProvider.setWalletAddress(address);
+                return address;
+            }
+            // Otherwise, use the mock wallet provider's connect
             await this.walletProvider.connect();
             return this.walletProvider.getPublicAddress();
+        }
+    }
+
+    // Set wallet address directly (for Solana wallet adapter integration)
+    setWalletAddress(address) {
+        if (this.walletProvider && typeof this.walletProvider.setWalletAddress === 'function') {
+            this.walletProvider.setWalletAddress(address);
         }
     }
 
     async disconnectWallet() {
         if (this.useRealSDK && this.sdk) {
             try {
-                await this.sdk.disconnectWallet();
+                if (typeof this.sdk.disconnectWallet === 'function') {
+                    await this.sdk.disconnectWallet();
+                } else {
+                    // Fallback if SDK lacks explicit disconnect
+                    this.useRealSDK = false;
+                    await this.walletProvider.disconnect();
+                }
+                // Ensure local mock state is clean
+                this.walletProvider?.setWalletAddress?.(null);
             } catch (error) {
                 console.error('Failed to disconnect wallet via SDK:', error);
                 throw error;
             }
         } else if (this.walletProvider) {
             await this.walletProvider.disconnect();
+            this.walletProvider.setWalletAddress?.(null);
         }
     }
 
@@ -634,17 +695,21 @@ class FallbackCipherPayService {
 
     // Utility Methods
     isConnected() {
+        // Must be connected **and** have a current address
         if (this.useRealSDK && this.sdk) {
-            return this.sdk.walletProvider && this.getPublicAddress() !== null;
+            const hasAddr = this.getPublicAddress() !== null;
+            // Prefer explicit flag if the SDK exposes one; otherwise rely on address + provider
+            return (!!this.sdk.walletProvider) && hasAddr;
         }
-        return this.walletProvider && this.getPublicAddress() !== null;
+        return (!!this.walletProvider?.connected) && (this.getPublicAddress() !== null);
     }
 
     getServiceStatus() {
+        const connected = this.isConnected();
         return {
             isInitialized: this.isInitialized,
-            isConnected: this.isConnected(),
-            publicAddress: this.getPublicAddress(),
+            isConnected: connected,
+            publicAddress: connected ? this.getPublicAddress() : null,
             balance: this.getBalance(),
             spendableNotes: this.getSpendableNotes().length,
             totalNotes: this.getAllNotes().length,

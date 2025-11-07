@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
 import SolanaStatus from './SolanaStatus';
@@ -9,13 +9,14 @@ function Dashboard() {
   const {
     isInitialized,
     isConnected,
+    isAuthenticated,
     publicAddress,
     balance,
     spendableNotes,
     allNotes,
     loading,
     error,
-    disconnectWallet,
+    signOut,
     refreshData,
     createDeposit,
     createTransfer,
@@ -32,27 +33,61 @@ function Dashboard() {
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawRecipient, setWithdrawRecipient] = useState('');
 
+  const hasRedirected = useRef(false);
+  const hasRefreshed = useRef(false);
+
   useEffect(() => {
-    if (!isInitialized) {
-      navigate('/');
+    // Redirect to login if not initialized, not connected, or not authenticated
+    // Checking isAuthenticated prevents redirect loop when user disconnects
+    if (!isInitialized || !isConnected || !isAuthenticated) {
+      // Always allow redirect if disconnected - don't block with flag
+      // The flag only prevents multiple redirects during the same render cycle
+      if (!hasRedirected.current) {
+        hasRedirected.current = true;
+        // Use setTimeout with 0 delay instead of requestAnimationFrame to avoid throttling
+        const timeoutId = setTimeout(() => {
+          navigate('/', { replace: true });
+        }, 0);
+        return () => clearTimeout(timeoutId);
+      }
       return;
     }
 
-    if (!isConnected) {
-      navigate('/');
-      return;
+    // Reset redirect flag when connected and authenticated (user can navigate back to dashboard)
+    if (isInitialized && isConnected && isAuthenticated) {
+      hasRedirected.current = false;
     }
 
-    // Refresh data when component mounts
-    refreshData();
-  }, [isInitialized, isConnected, navigate, refreshData]);
+    // Only proceed if initialized, connected, and authenticated
+    // Refresh data once when component mounts and is ready
+    if (!hasRefreshed.current) {
+      hasRefreshed.current = true;
+      refreshData();
+    }
+  }, [isInitialized, isConnected, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleDisconnect = async () => {
     try {
-      await disconnectWallet();
-      navigate('/');
+      // Sign out completely (clears both authentication and wallet connection)
+      // This prevents the redirect loop by clearing isAuthenticated
+      await signOut();
+      // Reset flags so user can reconnect later
+      hasRedirected.current = false;
+      hasRefreshed.current = false;
+      // Navigate to login page after sign out completes
+      // Use requestAnimationFrame to ensure it happens after state updates
+      requestAnimationFrame(() => {
+        navigate('/', { replace: true });
+      });
     } catch (err) {
       console.error('Failed to disconnect:', err);
+      // Reset flags even on error
+      hasRedirected.current = false;
+      hasRefreshed.current = false;
+      // Navigate even if sign out fails
+      requestAnimationFrame(() => {
+        navigate('/', { replace: true });
+      });
     }
   };
 

@@ -7,13 +7,27 @@ import fallbackCipherPayService, { FallbackCipherPayService } from './FallbackCi
 // Determine which service to use based on environment variables
 const getServiceType = () => {
     // Check if we should use the fallback service
-    if (process.env.REACT_APP_USE_FALLBACK_SERVICE === 'true') {
+    if (import.meta.env.VITE_USE_FALLBACK_SERVICE === 'true') {
         console.log('🔧 Using FallbackCipherPayService (development/fallback mode)');
         return 'fallback';
     }
 
     // Check if we should use the real SDK
-    if (process.env.REACT_APP_USE_REAL_SDK === 'true') {
+    if (import.meta.env.VITE_USE_REAL_SDK === 'true') {
+        // Verify that the SDK is actually a constructor before using it
+        if (typeof window !== 'undefined' && typeof window.CipherPaySDK !== 'undefined') {
+            const sdkGlobal = window.CipherPaySDK;
+            const isConstructor = typeof sdkGlobal === 'function' && 
+                                 (sdkGlobal.prototype && sdkGlobal.prototype.constructor === sdkGlobal);
+            
+            if (!isConstructor) {
+                console.warn('⚠️ VITE_USE_REAL_SDK=true but CipherPaySDK is not a constructor class');
+                console.warn('⚠️ SDK exports:', Object.keys(sdkGlobal || {}));
+                console.warn('⚠️ Falling back to FallbackCipherPayService');
+                return 'fallback';
+            }
+        }
+        
         console.log('🚀 Using CipherPayService (real SDK mode)');
         return 'real';
     }

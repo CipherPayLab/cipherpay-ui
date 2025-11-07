@@ -1,69 +1,98 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
+import WalletSelector from './WalletSelector';
 
 function Register() {
   const navigate = useNavigate();
   const {
     isInitialized,
     isConnected,
+    isAuthenticated,
     connectWallet,
+    signUp,
     createDeposit,
     loading,
     error,
     clearError
   } = useCipherPay();
 
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [registrationStep, setRegistrationStep] = useState('form'); // form, wallet, deposit, success
-  const [walletConnected, setWalletConnected] = useState(false);
+  const [registrationStep, setRegistrationStep] = useState('form'); // form, wallet-selection, authenticating, deposit, success
   const [depositAmount, setDepositAmount] = useState('');
   const [depositHash, setDepositHash] = useState('');
+  const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
-    if (isConnected) {
-      setWalletConnected(true);
+    if (isAuthenticated) {
+      setRegistrationStep('deposit');
     }
-  }, [isConnected]);
+  }, [isAuthenticated]);
 
-  const handleTraditionalRegister = (e) => {
+  const handleSignUp = (e) => {
     e.preventDefault();
-    if (password !== confirmPassword) {
-      alert('Passwords do not match!');
+    if (!isInitialized) {
+      alert('CipherPay service is still initializing. Please wait...');
       return;
     }
-    // TODO: Implement traditional registration logic here
-    console.log('Traditional registration attempt:', username, password);
-    navigate('/');
+    // Show wallet selection UI
+    setRegistrationStep('wallet-selection');
+    clearError();
   };
 
-  const handleWalletConnect = async () => {
+  const handleWalletConnect = () => {
+    if (!isInitialized) {
+      alert('CipherPay service is still initializing. Please wait...');
+      return;
+    }
+    // Show wallet selection UI
+    setRegistrationStep('wallet-selection');
+    clearError();
+  };
+
+  // Handle wallet connection from WalletSelector
+  const handleWalletConnected = async (walletAddress) => {
     if (!isInitialized) {
       alert('CipherPay service is still initializing. Please wait...');
       return;
     }
 
     try {
+      setIsConnecting(true);
+      setRegistrationStep('authenticating');
       clearError();
-      await connectWallet();
-      setWalletConnected(true);
-      setRegistrationStep('deposit');
+      
+      // Connect wallet to CipherPay service using the selected wallet address
+      if (!isConnected) {
+        await connectWallet();
+      }
+      
+      // Sign up (creates identity and authenticates)
+      await signUp();
+      // After successful signup, move to deposit step
+      // The useEffect will handle this via isAuthenticated
     } catch (err) {
-      console.error('Failed to connect wallet:', err);
+      console.error('Failed to connect wallet and sign up:', err);
+      alert(`Registration failed: ${err.message || 'Unknown error'}`);
+      setRegistrationStep('wallet-selection');
+    } finally {
+      setIsConnecting(false);
     }
+  };
+
+  const handleWalletDisconnected = () => {
+    // Wallet disconnected - clear any errors
+    clearError();
   };
 
   const handleDeposit = async (e) => {
     e.preventDefault();
 
-    if (!walletConnected) {
-      alert('Please connect your wallet first');
+    if (!isAuthenticated) {
+      alert('Please complete authentication first');
       return;
     }
 
-    if (Number(depositAmount) <= 0) {
+    if (!depositAmount || Number(depositAmount) <= 0) {
       alert('Please enter a valid deposit amount');
       return;
     }
@@ -72,8 +101,10 @@ function Register() {
       clearError();
       setRegistrationStep('depositing');
 
-      const txHash = await createDeposit(depositAmount);
-      setDepositHash(txHash);
+      const amountInLamports = BigInt(Math.floor(parseFloat(depositAmount) * 1e9));
+      const txHash = await createDeposit(amountInLamports);
+      const txHashStr = txHash?.txHash || txHash || 'pending';
+      setDepositHash(txHashStr);
       setRegistrationStep('success');
 
       // Redirect to dashboard after successful registration
@@ -83,6 +114,7 @@ function Register() {
 
     } catch (err) {
       console.error('Deposit failed:', err);
+      alert(`Deposit failed: ${err.message || 'Unknown error'}`);
       setRegistrationStep('deposit');
     }
   };
@@ -125,61 +157,22 @@ function Register() {
           </div>
         )}
 
-        {/* Traditional Registration */}
+        {/* Registration Form */}
         {registrationStep === 'form' && (
           <div className="mt-8 space-y-6">
-            <form className="space-y-6" onSubmit={handleTraditionalRegister}>
+            <form className="space-y-6" onSubmit={handleSignUp}>
               <div>
-                <label htmlFor="username" className="block text-sm font-medium text-gray-700">
-                  Username
-                </label>
-                <input
-                  id="username"
-                  name="username"
-                  type="text"
-                  required
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="Choose a username"
-                />
-              </div>
-              <div>
-                <label htmlFor="password" className="block text-sm font-medium text-gray-700">
-                  Password
-                </label>
-                <input
-                  id="password"
-                  name="password"
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="Create a password"
-                />
-              </div>
-              <div>
-                <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700">
-                  Confirm Password
-                </label>
-                <input
-                  id="confirmPassword"
-                  name="confirmPassword"
-                  type="password"
-                  required
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="Confirm your password"
-                />
+                <p className="text-sm text-gray-600 text-center">
+                  Create your CipherPay account. Your identity will be generated automatically.
+                </p>
               </div>
               <div>
                 <button
                   type="submit"
-                  className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-indigo-600 bg-white border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                  disabled={loading}
+                  className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Create Account
+                  {loading ? 'Creating account...' : 'Create Account'}
                 </button>
               </div>
             </form>
@@ -212,15 +205,49 @@ function Register() {
           </div>
         )}
 
+        {/* Wallet Selection Step */}
+        {registrationStep === 'wallet-selection' && (
+          <div className="mt-8 space-y-6">
+            <div>
+              <p className="text-sm text-gray-600 text-center mb-4">
+                Select a wallet to create your CipherPay account
+              </p>
+            </div>
+            <WalletSelector
+              onWalletConnected={handleWalletConnected}
+              onWalletDisconnected={handleWalletDisconnected}
+            />
+            <div className="text-center">
+              <button
+                onClick={() => setRegistrationStep('form')}
+                className="text-sm text-gray-600 hover:text-gray-900"
+              >
+                ← Back
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Authenticating Step */}
+        {registrationStep === 'authenticating' && (
+          <div className="mt-8 space-y-6">
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+              <h3 className="text-lg font-medium text-gray-900">Creating Your Account</h3>
+              <p className="text-gray-600">Please wait while we set up your CipherPay identity...</p>
+            </div>
+          </div>
+        )}
+
         {/* Deposit Step */}
         {registrationStep === 'deposit' && (
           <div className="mt-8 space-y-6">
             <div className="bg-green-50 border border-green-200 rounded-md p-4">
               <div className="flex">
                 <div className="ml-3">
-                  <h3 className="text-sm font-medium text-green-800">Wallet Connected!</h3>
+                  <h3 className="text-sm font-medium text-green-800">Account Created!</h3>
                   <div className="mt-2 text-sm text-green-700">
-                    <p>Your wallet has been successfully connected. Now let's make your first deposit.</p>
+                    <p>Your CipherPay account has been created. Now let's make your first deposit.</p>
                   </div>
                 </div>
               </div>
@@ -229,7 +256,7 @@ function Register() {
             <form className="space-y-6" onSubmit={handleDeposit}>
               <div>
                 <label htmlFor="depositAmount" className="block text-sm font-medium text-gray-700">
-                  Initial Deposit Amount (ETH)
+                  Initial Deposit Amount (SOL)
                 </label>
                 <input
                   id="depositAmount"
