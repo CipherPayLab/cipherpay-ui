@@ -15,6 +15,7 @@
 
 // Import SDK loader to get the global SDK instance
 import { loadSDK, getSDKStatus } from './sdkLoader';
+import { fetchAccountOverview, fetchMessages, decryptMessages, computeAccountOverview } from './accountOverviewService';
 
 class CipherPayService {
     constructor() {
@@ -436,6 +437,44 @@ class CipherPayService {
             cacheStats: this.getCacheStats(),
             chainType: this.config.chainType
         };
+    }
+
+    // Account Overview from Backend (decrypts messages.ciphertext)
+    async getAccountOverviewFromBackend(options = {}) {
+        try {
+            const overview = await fetchAccountOverview(options);
+            return overview;
+        } catch (error) {
+            console.error('[CipherPayService] Failed to get account overview from backend:', error);
+            throw error;
+        }
+    }
+
+    async getMessagesFromBackend(options = {}) {
+        try {
+            return await fetchMessages(options);
+        } catch (error) {
+            console.error('[CipherPayService] Failed to fetch messages from backend:', error);
+            throw error;
+        }
+    }
+
+    async decryptMessagesFromBackend(messages) {
+        try {
+            return decryptMessages(messages);
+        } catch (error) {
+            console.error('[CipherPayService] Failed to decrypt messages:', error);
+            throw error;
+        }
+    }
+
+    async computeAccountOverviewFromNotes(notes, checkOnChain = false) {
+        try {
+            return await computeAccountOverview(notes, checkOnChain);
+        } catch (error) {
+            console.error('[CipherPayService] Failed to compute account overview:', error);
+            throw error;
+        }
     }
 
     // Configuration Management

@@ -121,12 +121,47 @@ export const CipherPayProvider = ({ children }) => {
             setPublicAddress(status.publicAddress);
         }
 
+        // Try to get account overview from backend (decrypts messages.ciphertext)
+        // Falls back to SDK's in-memory note manager if backend fails
+        // Check auth token directly instead of isAuthenticated state (which may not be updated yet)
+        const authToken = localStorage.getItem('cipherpay_token');
+        const isAuthTokenPresent = !!authToken;
+        
+        try {
+            console.log('[CipherPayContext] updateServiceStatus: isAuthenticated =', isAuthenticated, 'authToken present =', isAuthTokenPresent);
+            if (isAuthTokenPresent) {
+                console.log('[CipherPayContext] updateServiceStatus: Attempting to get account overview from backend...');
+                const backendOverview = await cipherPayService.getAccountOverviewFromBackend({ checkOnChain: false });
+                
+                console.log('[CipherPayContext] updateServiceStatus: Got account overview from backend:', backendOverview);
+                // Update balance from backend overview (even if 0)
+                setBalance(backendOverview.shieldedBalance || 0n);
+                // Update notes from backend overview (even if empty)
+                const spendable = (backendOverview.notes || []).filter(n => !n.isSpent);
+                setSpendableNotes(spendable);
+                setAllNotes((backendOverview.notes || []).map(n => ({
+                    ...n.note,
+                    commitment: n.nullifierHex, // Use nullifier hex as identifier
+                    spent: n.isSpent,
+                    amount: n.amount,
+                })));
+                console.log('[CipherPayContext] updateServiceStatus: Updated from backend overview - balance:', backendOverview.shieldedBalance, 'notes:', backendOverview.notes?.length || 0);
+                return; // Early return, skip SDK fallback
+            } else {
+                console.log('[CipherPayContext] updateServiceStatus: No auth token, skipping backend account overview');
+            }
+        } catch (error) {
+            console.warn('[CipherPayContext] updateServiceStatus: Failed to get account overview from backend, falling back to SDK:', error);
+            console.warn('[CipherPayContext] updateServiceStatus: Error details:', error.message, error.stack);
+        }
+
+        // Fallback to SDK's in-memory note manager
         if (status.balance !== undefined) {
             console.log('[CipherPayContext] updateServiceStatus: Setting balance to:', status.balance);
             setBalance(status.balance);
         }
 
-        // Update notes
+        // Update notes from SDK
         setSpendableNotes(cipherPayService.getSpendableNotes());
         const notes = await cipherPayService.getAllNotes();
         setAllNotes(Array.isArray(notes) ? notes : []);
@@ -437,10 +472,24 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] signIn: Final wallet address to use:', walletAddr);
             console.log('[CipherPayContext] signIn: About to call authService.authenticate with wallet address:', walletAddr);
             
-            const result = await authService.authenticate(sdk, walletAddr);
+            await authService.authenticate(sdk, walletAddr);
             setIsAuthenticated(true);
-            setAuthUser(result.user);
-            return result;
+            // Get user from localStorage (stored by authService.setAuthToken)
+            const storedUser = localStorage.getItem('cipherpay_user');
+            if (storedUser) {
+                try {
+                    setAuthUser(JSON.parse(storedUser));
+                } catch (e) {
+                    console.warn('[CipherPayContext] signIn: Failed to parse stored user:', e);
+                }
+            }
+            // Refresh account overview from backend after authentication
+            // Use setTimeout to ensure token is stored and state has updated
+            setTimeout(() => {
+                console.log('[CipherPayContext] signIn: Triggering account overview refresh after authentication');
+                updateServiceStatus();
+            }, 100);
+            return { success: true };
         } catch (err) {
             setError(err.message);
             throw err;
@@ -473,10 +522,24 @@ export const CipherPayProvider = ({ children }) => {
                 publicAddress,
                 solanaPublicKey: solanaPublicKey?.toBase58()
             });
-            const result = await authService.authenticate(sdk, walletAddr);
+            await authService.authenticate(sdk, walletAddr);
             setIsAuthenticated(true);
-            setAuthUser(result.user);
-            return result;
+            // Get user from localStorage (stored by authService.setAuthToken)
+            const storedUser = localStorage.getItem('cipherpay_user');
+            if (storedUser) {
+                try {
+                    setAuthUser(JSON.parse(storedUser));
+                } catch (e) {
+                    console.warn('[CipherPayContext] signUp: Failed to parse stored user:', e);
+                }
+            }
+            // Refresh account overview from backend after authentication
+            // Use setTimeout to ensure token is stored and state has updated
+            setTimeout(() => {
+                console.log('[CipherPayContext] signUp: Triggering account overview refresh after authentication');
+                updateServiceStatus();
+            }, 100);
+            return { success: true };
         } catch (err) {
             setError(err.message);
             throw err;

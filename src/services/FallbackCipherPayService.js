@@ -18,6 +18,7 @@
 
 // Import SDK loader
 import { loadSDK, getSDKStatus } from './sdkLoader';
+import { fetchAccountOverview, fetchMessages, decryptMessages, computeAccountOverview } from './accountOverviewService';
 
 // Mock implementations for testing when real SDK is not available
 class MockWalletProvider {
@@ -717,6 +718,44 @@ class FallbackCipherPayService {
             chainType: this.config.chainType,
             useRealSDK: this.useRealSDK
         };
+    }
+
+    // Account Overview from Backend (decrypts messages.ciphertext)
+    async getAccountOverviewFromBackend(options = {}) {
+        try {
+            const overview = await fetchAccountOverview(options);
+            return overview;
+        } catch (error) {
+            console.error('[FallbackCipherPayService] Failed to get account overview from backend:', error);
+            throw error;
+        }
+    }
+
+    async getMessagesFromBackend(options = {}) {
+        try {
+            return await fetchMessages(options);
+        } catch (error) {
+            console.error('[FallbackCipherPayService] Failed to fetch messages from backend:', error);
+            throw error;
+        }
+    }
+
+    async decryptMessagesFromBackend(messages) {
+        try {
+            return decryptMessages(messages);
+        } catch (error) {
+            console.error('[FallbackCipherPayService] Failed to decrypt messages:', error);
+            throw error;
+        }
+    }
+
+    async computeAccountOverviewFromNotes(notes, checkOnChain = false) {
+        try {
+            return await computeAccountOverview(notes, checkOnChain);
+        } catch (error) {
+            console.error('[FallbackCipherPayService] Failed to compute account overview:', error);
+            throw error;
+        }
     }
 
     // Cleanup
