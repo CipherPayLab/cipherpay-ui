@@ -79,13 +79,16 @@ function Login() {
       setIsConnecting(true);
       clearError();
       
+      console.log('[Login] handleWalletConnected: walletAddress parameter:', walletAddress);
+      
       // Connect wallet to CipherPay service using the selected wallet address
       if (!isConnected) {
         await connectWallet();
       }
       
       // Automatically authenticate after wallet connection
-      await signIn();
+      // Pass the wallet address directly to ensure it's used
+      await signIn(walletAddress);
       
       // Mark that user authenticated in this session
       sessionAuthenticatedRef.current = true;
@@ -121,13 +124,17 @@ function Login() {
       setIsConnecting(true);
       clearError();
       
+      // Get wallet address from the connected wallet
+      const walletAddr = publicKey.toBase58();
+      console.log('[Login] handleSignIn: Using wallet address:', walletAddr);
+      
       // Connect wallet to CipherPay service if not already connected
       if (!isConnected) {
         await connectWallet();
       }
       
-      // Authenticate with server
-      await signIn();
+      // Authenticate with server, passing the wallet address directly
+      await signIn(walletAddr);
       
       // Mark that user authenticated in this session
       sessionAuthenticatedRef.current = true;

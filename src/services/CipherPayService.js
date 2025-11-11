@@ -172,6 +172,30 @@ class CipherPayService {
         return balance || 0n;
     }
 
+    // Get stored ATA from database (via backend API)
+    async getUserAta() {
+        if (!this.isInitialized) await this.initialize();
+        
+        try {
+            // Import authService dynamically to avoid circular dependencies
+            const authService = (await import('./authService.js')).default;
+            
+            // Get user info which includes stored ATA
+            const userData = await authService.getMe();
+            
+            return {
+                wsolAta: userData.wsolAta || null,
+                solanaWalletAddress: userData.solanaWalletAddress || null,
+            };
+        } catch (error) {
+            console.error('[CipherPayService] Failed to get user ATA from DB:', error);
+            return {
+                wsolAta: null,
+                solanaWalletAddress: null,
+            };
+        }
+    }
+
     addNote(note) {
         if (this.sdk?.noteManager) {
             this.sdk.noteManager.addNote(note);
@@ -248,15 +272,29 @@ class CipherPayService {
         if (!this.isInitialized) await this.initialize();
 
         try {
-            const txHash = await this.sdk.walletProvider.signAndSendDepositTx(
-                this.getPublicAddress(),
-                amount.toString()
-            );
-            return txHash;
+            // Use the new deposit flow via SDK if available, otherwise use backend API
+            if (this.sdk?.flows?.deposit) {
+                // Direct SDK usage - would need proper setup with identity, token, etc.
+                // For now, use backend API approach
+                return await this.createDepositViaAPI(amount);
+            } else {
+                return await this.createDepositViaAPI(amount);
+            }
         } catch (error) {
             console.error('Failed to create deposit:', error);
             throw error;
         }
+    }
+
+    async createDepositViaAPI(amount) {
+        // This is a placeholder - the actual implementation should:
+        // 1. Get wallet address and connection
+        // 2. Ensure user has tokens in ATA
+        // 3. Call prepare/deposit API
+        // 4. Generate proof
+        // 5. Call submit/deposit API
+        // For now, return a promise that indicates the flow needs to be implemented
+        throw new Error('Deposit via API not yet fully implemented. Please use the SDK deposit flow directly.');
     }
 
     // Proof Management

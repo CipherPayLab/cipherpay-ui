@@ -156,32 +156,34 @@ export const CipherPayProvider = ({ children }) => {
                 // Ignore sessionStorage errors
             }
             
+            let walletAddress = null;
+            
             // If Solana wallet is connected, use its address
             if (solanaConnected && solanaPublicKey) {
-                const address = solanaPublicKey.toBase58();
-                console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', address);
+                walletAddress = solanaPublicKey.toBase58();
+                console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', walletAddress);
                 
                 if (cipherPayService.setWalletAddress) {
-                    cipherPayService.setWalletAddress(address);
+                    cipherPayService.setWalletAddress(walletAddress);
                     // Ensure service internal connection flag is set as well
                     if (cipherPayService.connectWallet) {
-                        await cipherPayService.connectWallet(address);
+                        await cipherPayService.connectWallet(walletAddress);
                     }
                 } else {
                     // Fallback: try to connect through service with wallet address
-                    await cipherPayService.connectWallet(address);
+                    await cipherPayService.connectWallet(walletAddress);
                 }
                 
-                setPublicAddress(address);
+                setPublicAddress(walletAddress);
                 setIsConnected(true);
-                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', walletAddress);
             } else {
                 // Fallback to service's connectWallet (for mock or SDK)
-                const address = await cipherPayService.connectWallet();
-                console.log('[CipherPayContext] connectWallet: SDK returned address:', address);
-                setPublicAddress(address);
+                walletAddress = await cipherPayService.connectWallet();
+                console.log('[CipherPayContext] connectWallet: SDK returned address:', walletAddress);
+                setPublicAddress(walletAddress);
                 setIsConnected(true);
-                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', walletAddress);
             }
 
             // Add a small delay to ensure service state is updated
@@ -191,7 +193,22 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] connectWallet: About to call updateServiceStatus...');
             await updateServiceStatus();
             console.log('[CipherPayContext] connectWallet: updateServiceStatus completed');
-            return publicAddress || solanaPublicKey?.toBase58();
+            
+            // Store wallet address for use in authentication
+            if (walletAddress) {
+                try {
+                    sessionStorage.setItem('cipherpay_wallet_address', walletAddress);
+                    console.log('[CipherPayContext] ====== STORED WALLET ADDRESS (v2) ======');
+                    console.log('[CipherPayContext] connectWallet: Stored wallet address in sessionStorage:', walletAddress);
+                    console.log('[CipherPayContext] ====== END STORED WALLET ADDRESS ======');
+                } catch (e) {
+                    console.warn('[CipherPayContext] connectWallet: Failed to store wallet address in sessionStorage:', e);
+                }
+            } else {
+                console.warn('[CipherPayContext] connectWallet: No wallet address to store');
+            }
+            
+            return walletAddress;
         } catch (err) {
             console.error('[CipherPayContext] connectWallet: Error occurred:', err);
             setError(err.message);
@@ -390,11 +407,37 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Authentication Management
-    const signIn = async () => {
+    const signIn = async (walletAddressOverride = null) => {
         try {
+            console.log('[CipherPayContext] ====== SIGNIN CALLED (v2) ======');
             setLoading(true);
             setError(null);
-            const result = await authService.authenticate(sdk);
+            // Get Solana wallet address from multiple sources
+            // Priority: 1. Override parameter, 2. sessionStorage, 3. context state, 4. wallet adapter
+            let walletAddr = walletAddressOverride;
+            console.log('[CipherPayContext] signIn: Called with override:', walletAddressOverride);
+            console.log('[CipherPayContext] signIn: Override type:', typeof walletAddressOverride);
+            
+            if (!walletAddr) {
+                try {
+                    walletAddr = sessionStorage.getItem('cipherpay_wallet_address');
+                    console.log('[CipherPayContext] signIn: Retrieved from sessionStorage:', walletAddr);
+                } catch (e) {
+                    console.warn('[CipherPayContext] signIn: Failed to read sessionStorage:', e);
+                }
+            }
+            if (!walletAddr) {
+                walletAddr = publicAddress || solanaPublicKey?.toBase58() || null;
+                console.log('[CipherPayContext] signIn: Using context/wallet adapter:', walletAddr, {
+                    publicAddress,
+                    solanaPublicKey: solanaPublicKey?.toBase58()
+                });
+            }
+            
+            console.log('[CipherPayContext] signIn: Final wallet address to use:', walletAddr);
+            console.log('[CipherPayContext] signIn: About to call authService.authenticate with wallet address:', walletAddr);
+            
+            const result = await authService.authenticate(sdk, walletAddr);
             setIsAuthenticated(true);
             setAuthUser(result.user);
             return result;
@@ -406,12 +449,31 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    const signUp = async () => {
+    const signUp = async (walletAddressOverride = null) => {
         try {
             setLoading(true);
             setError(null);
             // Sign up is the same as sign in - server creates user on first challenge
-            const result = await authService.authenticate(sdk);
+            // Get Solana wallet address from multiple sources
+            // Priority: 1. Override parameter, 2. sessionStorage, 3. context state, 4. wallet adapter
+            let walletAddr = walletAddressOverride;
+            if (!walletAddr) {
+                try {
+                    walletAddr = sessionStorage.getItem('cipherpay_wallet_address');
+                } catch (e) {
+                    // Ignore sessionStorage errors
+                }
+            }
+            if (!walletAddr) {
+                walletAddr = publicAddress || solanaPublicKey?.toBase58() || null;
+            }
+            console.log('[CipherPayContext] signUp: Using wallet address:', walletAddr, {
+                override: walletAddressOverride,
+                sessionStorage: sessionStorage.getItem('cipherpay_wallet_address'),
+                publicAddress,
+                solanaPublicKey: solanaPublicKey?.toBase58()
+            });
+            const result = await authService.authenticate(sdk, walletAddr);
             setIsAuthenticated(true);
             setAuthUser(result.user);
             return result;

@@ -478,8 +478,28 @@ class AuthService {
     return { x, y };
   }
 
-  async requestChallenge(ownerKey, authPubKey) {
-    const res = await axios.post(`${SERVER_URL}/auth/challenge`, { ownerKey, authPubKey });
+  async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null) {
+    const payload = { ownerKey, authPubKey };
+    console.log('[AuthService] requestChallenge: solanaWalletAddress parameter:', solanaWalletAddress);
+    
+    // FALLBACK: If wallet address is not provided, try to get it from sessionStorage
+    if (!solanaWalletAddress) {
+      try {
+        solanaWalletAddress = sessionStorage.getItem('cipherpay_wallet_address');
+        console.log('[AuthService] requestChallenge FALLBACK: Retrieved wallet address from sessionStorage:', solanaWalletAddress);
+      } catch (e) {
+        console.warn('[AuthService] requestChallenge FALLBACK: Failed to read sessionStorage:', e);
+      }
+    }
+    
+    if (solanaWalletAddress) {
+      payload.solanaWalletAddress = solanaWalletAddress;
+      console.log('[AuthService] requestChallenge: Added solanaWalletAddress to payload:', solanaWalletAddress);
+    } else {
+      console.log('[AuthService] requestChallenge: solanaWalletAddress is falsy, not adding to payload');
+    }
+    console.log('[AuthService] requestChallenge: Final payload:', { ...payload, authPubKey: '...' });
+    const res = await axios.post(`${SERVER_URL}/auth/challenge`, payload);
     return res.data;
   }
 
@@ -501,10 +521,55 @@ class AuthService {
     }
   }
 
-  async authenticate(sdk = null) {
+  async authenticate(sdk = null, solanaWalletAddress = null) {
     try {
+      console.log('[AuthService] ====== AUTHENTICATE CALLED (v2) ======');
       console.log('[AuthService] Starting authentication flow');
       console.log('[AuthService] Server URL:', SERVER_URL);
+      console.log('[AuthService] ====== WALLET ADDRESS DEBUG ======');
+      console.log('[AuthService] Solana wallet address parameter:', solanaWalletAddress);
+      console.log('[AuthService] Solana wallet address type:', typeof solanaWalletAddress);
+      console.log('[AuthService] Solana wallet address is null?', solanaWalletAddress === null);
+      console.log('[AuthService] Solana wallet address is undefined?', solanaWalletAddress === undefined);
+      console.log('[AuthService] Solana wallet address value:', String(solanaWalletAddress));
+      
+      // FALLBACK: If wallet address is not provided, try multiple sources
+      if (!solanaWalletAddress) {
+        // Try sessionStorage first
+        try {
+          solanaWalletAddress = sessionStorage.getItem('cipherpay_wallet_address');
+          console.log('[AuthService] FALLBACK 1: Retrieved from sessionStorage:', solanaWalletAddress);
+        } catch (e) {
+          console.warn('[AuthService] FALLBACK 1: Failed to read sessionStorage:', e);
+        }
+        
+        // Try localStorage as backup
+        if (!solanaWalletAddress) {
+          try {
+            solanaWalletAddress = localStorage.getItem('cipherpay_wallet_address');
+            console.log('[AuthService] FALLBACK 2: Retrieved from localStorage:', solanaWalletAddress);
+          } catch (e) {
+            console.warn('[AuthService] FALLBACK 2: Failed to read localStorage:', e);
+          }
+        }
+        
+        // Try window object (if set by wallet adapter)
+        if (!solanaWalletAddress && typeof window !== 'undefined') {
+          try {
+            // Check if Solana wallet adapter has the public key
+            if (window.solana?.publicKey) {
+              solanaWalletAddress = window.solana.publicKey.toBase58();
+              console.log('[AuthService] FALLBACK 3: Retrieved from window.solana.publicKey:', solanaWalletAddress);
+            }
+          } catch (e) {
+            console.warn('[AuthService] FALLBACK 3: Failed to read window.solana:', e);
+          }
+        }
+      }
+      
+      console.log('[AuthService] Final wallet address to use:', solanaWalletAddress);
+      console.log('[AuthService] Will send to backend:', !!solanaWalletAddress);
+      console.log('[AuthService] ====== END WALLET ADDRESS DEBUG ======');
 
       const identity = await this.getOrCreateIdentity(sdk);
       console.log('[AuthService] Identity created/retrieved');
@@ -517,7 +582,7 @@ class AuthService {
       console.log('[AuthService] Auth pub key retrieved:', authPubKey);
 
       console.log('[AuthService] Requesting challenge...');
-      const { nonce } = await this.requestChallenge(ownerKey, authPubKey);
+      const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress);
       console.log('[AuthService] Challenge received, nonce:', String(nonce).substring(0, 16) + '...');
 
       console.log('[AuthService] Computing message field with nonce and ownerKey...');

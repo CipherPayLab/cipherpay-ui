@@ -61,13 +61,16 @@ function Register() {
       setRegistrationStep('authenticating');
       clearError();
       
+      console.log('[Register] handleWalletConnected: walletAddress parameter:', walletAddress);
+      
       // Connect wallet to CipherPay service using the selected wallet address
       if (!isConnected) {
         await connectWallet();
       }
       
       // Sign up (creates identity and authenticates)
-      await signUp();
+      // Pass the wallet address directly to ensure it's used
+      await signUp(walletAddress);
       // After successful signup, move to deposit step
       // The useEffect will handle this via isAuthenticated
     } catch (err) {
