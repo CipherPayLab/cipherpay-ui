@@ -21,13 +21,14 @@ class CipherPayService {
     constructor() {
         this.sdk = null;
         this.isInitialized = false;
+        this.walletAddress = null; // Store wallet address from external wallet adapter
         this.config = {
             chainType: 'solana', // Use string instead of ChainType enum
             rpcUrl: import.meta.env.VITE_RPC_URL || 'http://127.0.0.1:8899',
             relayerUrl: import.meta.env.VITE_RELAYER_URL || 'http://localhost:3000',
             relayerApiKey: import.meta.env.VITE_RELAYER_API_KEY,
             contractAddress: import.meta.env.VITE_CONTRACT_ADDRESS,
-            programId: 'XeEs3gHZGdDhs3Lm1VoukrWrEnjdC3CA5VRtowN5MGz', // Solana program ID
+            programId: import.meta.env.VITE_PROGRAM_ID || 'BCrt2kn5HR4B7CHEMSBacekhzVTKYhzAQAB5YNkr5kJf', // Solana program ID
             enableCompliance: true,
             enableCaching: true,
             enableStealthAddresses: true,
@@ -55,7 +56,7 @@ class CipherPayService {
             if (!sdkInitialized || !CipherPaySDK) {
                 // Check if SDK exists but is not a constructor
                 if (typeof window !== 'undefined' && typeof window.CipherPaySDK !== 'undefined') {
-                    throw new Error('CipherPaySDK found in global scope but is not a constructor class. The SDK appears to export utility functions only. Please use FallbackCipherPayService by setting VITE_USE_FALLBACK_SERVICE=true or VITE_USE_REAL_SDK=false');
+                    throw new Error('CipherPaySDK found in global scope but is not a constructor class. The SDK appears to export utility functions only.');
                 }
                 throw new Error('CipherPay SDK not available in global scope. Ensure the SDK bundle is loaded via script tag in index.html');
             }
@@ -112,35 +113,68 @@ class CipherPayService {
     }
 
     // Wallet Management
-    async connectWallet() {
+    async connectWallet(walletAddress = null) {
         if (!this.isInitialized) await this.initialize();
 
         try {
-            // Connect to wallet through the SDK
-            const result = await this.sdk.walletProvider.connect();
-            console.log('[CipherPayService] connectWallet: SDK walletProvider.connect() result:', result);
-            return this.sdk.walletProvider.getPublicAddress();
+            // Wallet connection is managed externally by Solana wallet adapter
+            // We just store the wallet address here
+            if (walletAddress) {
+                this.walletAddress = walletAddress;
+                console.log('[CipherPayService] connectWallet: Stored wallet address:', walletAddress);
+                return walletAddress;
+            }
+            
+            // If no address provided, try to get from SDK (fallback)
+            if (this.sdk?.walletProvider?.getPublicAddress) {
+                const address = this.sdk.walletProvider.getPublicAddress();
+                if (address) {
+                    this.walletAddress = address;
+                    console.log('[CipherPayService] connectWallet: Got address from SDK:', address);
+                    return address;
+                }
+            }
+            
+            console.warn('[CipherPayService] connectWallet: No wallet address provided and SDK has none');
+            return null;
         } catch (error) {
             console.error('Failed to connect wallet:', error);
             throw error;
         }
     }
+    
+    setWalletAddress(address) {
+        this.walletAddress = address;
+        console.log('[CipherPayService] setWalletAddress:', address);
+    }
 
     async disconnectWallet() {
-        if (this.sdk?.walletProvider) {
+        // Clear stored wallet address
+        this.walletAddress = null;
+        console.log('[CipherPayService] disconnectWallet: Cleared wallet address');
+        
+        // Try to disconnect from SDK wallet provider if it exists
+        if (this.sdk?.walletProvider?.disconnect) {
             try {
                 await this.sdk.walletProvider.disconnect();
             } catch (error) {
-                console.error('Failed to disconnect wallet:', error);
-                throw error;
+                console.error('Failed to disconnect SDK wallet:', error);
+                // Don't throw - wallet is managed externally
             }
         }
     }
 
     getPublicAddress() {
         try {
-            const address = this.sdk?.walletProvider?.getPublicAddress();
-            console.log('[CipherPayService] getPublicAddress:', address);
+            // First check if we have a stored wallet address from external wallet adapter
+            if (this.walletAddress) {
+                console.log('[CipherPayService] getPublicAddress: Using stored address:', this.walletAddress);
+                return this.walletAddress;
+            }
+            
+            // Fallback to SDK wallet provider
+            const address = this.sdk?.walletProvider?.getPublicAddress?.();
+            console.log('[CipherPayService] getPublicAddress: SDK address:', address);
             return address || null;
         } catch (error) {
             if (error.message && error.message.includes('No wallet connected')) {

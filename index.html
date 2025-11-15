@@ -32,16 +32,16 @@
       }
     })();
   </script>
-  <!-- Inject Buffer globally BEFORE any other scripts -->
-  <script type="module">
-    import { Buffer } from 'buffer';
-    window.Buffer = Buffer;
-    globalThis.Buffer = Buffer;
-    if (typeof global !== 'undefined') global.Buffer = Buffer;
-    console.log('[HTML] Buffer injected globally, has writeUInt32BE:', typeof Buffer.prototype.writeUInt32BE);
-  </script>
-  <!-- Load CipherPay SDK bundle -->
+  <!-- Load CipherPay SDK bundle - includes Buffer and other polyfills -->
   <script src="/sdk/cipherpay-sdk.browser.js"></script>
+  <!-- Verify Buffer is loaded -->
+  <script>
+    if (typeof Buffer !== 'undefined' && Buffer.prototype.writeUInt32BE) {
+      console.log('[HTML] ✅ Buffer loaded from SDK bundle, has writeUInt32BE:', typeof Buffer.prototype.writeUInt32BE);
+    } else {
+      console.error('[HTML] ❌ Buffer not properly loaded from SDK bundle');
+    }
+  </script>
 </head>
 
 <body>

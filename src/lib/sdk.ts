@@ -23,20 +23,32 @@ export async function getSDK(): Promise<SDKShape> {
   if (cached) return cached;
   if (typeof window !== "undefined" && window.CipherPaySDK) {
     const sdk = window.CipherPaySDK;
-    console.log('[SDK] Found window.CipherPaySDK:', typeof sdk, Object.keys(sdk || {}));
-    // Check if it's an object with exports
-    if (sdk && typeof sdk === 'object') {
-      cached = sdk as unknown as SDKShape;
-      console.log('[SDK] Cached SDK object, has poseidonHash:', typeof cached.poseidonHash);
-      return cached;
+    console.log('[SDK] Found window.CipherPaySDK:', typeof sdk);
+    
+    // CipherPaySDK can be either:
+    // 1. A function (class constructor) with utility methods as properties
+    // 2. An object with utility methods
+    
+    if (sdk && (typeof sdk === 'object' || typeof sdk === 'function')) {
+      // Check if utility functions are available
+      const hasUtils = typeof sdk.poseidonHash === 'function' && 
+                       typeof sdk.commitmentOf === 'function';
+      
+      console.log('[SDK] SDK has utility functions:', hasUtils);
+      console.log('[SDK] Available properties:', Object.keys(sdk).filter(k => typeof sdk[k] === 'function'));
+      
+      if (hasUtils) {
+        cached = sdk as unknown as SDKShape;
+        console.log('[SDK] Cached SDK, ready to use');
+        return cached;
+      }
     }
   }
   
   // In browser, we should always use window.CipherPaySDK (loaded via script tag)
-  // Don't try to import cipherpay-sdk module - it's not available in browser build
-  // The browser bundle is loaded via <script> tag in index.html
-  // Vite will try to statically analyze imports, so we avoid dynamic import here
-  console.error('[SDK] CipherPaySDK not found on window object');
+  console.error('[SDK] CipherPaySDK not found or missing utility functions');
+  console.error('[SDK] window.CipherPaySDK type:', typeof window?.CipherPaySDK);
+  console.error('[SDK] Available on window.CipherPaySDK:', window?.CipherPaySDK ? Object.keys(window.CipherPaySDK) : 'null');
   throw new Error(
     "CipherPaySDK not available. Ensure postinstall copied browser bundle to public/sdk and index.html includes it."
   );
