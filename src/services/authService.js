@@ -267,16 +267,94 @@ class AuthService {
   getUser() { return this.user || null; }
   _toBigIntFlexible(v) { return toBigIntFlexible(v); }
 
-  async getOrCreateIdentity(sdk = null) {
+  /**
+   * Derive a deterministic CipherPay Identity from a blockchain wallet signature.
+   * This ensures the same wallet always generates the same CipherPay identity across devices.
+   * 
+   * @param {Object} wallet - Solana wallet adapter with signMessage method
+   * @param {string} walletAddress - Base58 wallet address
+   * @returns {Promise<Object>} CipherPay identity with keypair
+   */
+  async deriveIdentityFromWallet(wallet, walletAddress) {
+    try {
+      console.log('[AuthService] Deriving deterministic identity for wallet:', walletAddress);
+      
+      // Create a deterministic message specific to CipherPay identity derivation
+      const message = `CipherPay Identity Derivation\n\nWallet: ${walletAddress}\n\nSign this message to derive your permanent CipherPay identity. This identity will be the same across all devices for this wallet.`;
+      
+      // Request signature from wallet
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = await wallet.signMessage(messageBytes);
+      
+      // Convert signature to hex for deterministic seed
+      const signatureHex = Array.from(signatureBytes)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+      
+      console.log('[AuthService] Signature obtained, length:', signatureHex.length);
+      
+      // Derive keypair from signature using Poseidon hash for domain separation
+      // Use two different domain separators to generate independent keys
+      const seed = BigInt('0x' + signatureHex);
+      
+      // Generate privKey: Hash(seed, 1)
+      const privKeySeed = await poseidonHash([seed % BigInt('0x' + 'f'.repeat(64)), 1n]);
+      const privKey = privKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001'); // BN254 field modulus
+      
+      // Generate pubKey: Hash(seed, 2)
+      const pubKeySeed = await poseidonHash([seed % BigInt('0x' + 'f'.repeat(64)), 2n]);
+      const pubKey = pubKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001');
+      
+      console.log('[AuthService] Derived deterministic identity with distinct keys');
+      
+      // Store the wallet address used for derivation (for validation on reload)
+      const identity = { 
+        keypair: { privKey, pubKey },
+        derivedFromWallet: walletAddress,
+        derivationTimestamp: Date.now()
+      };
+      
+      return identity;
+    } catch (error) {
+      console.error('[AuthService] Failed to derive identity from wallet:', error);
+      throw new Error('Failed to derive identity from wallet signature. Please try again.');
+    }
+  }
+
+  async getOrCreateIdentity(sdk = null, wallet = null, walletAddress = null) {
+    // Check if we have a valid stored identity
     if (this.identity) {
       // Validate existing identity - check if keys are properly normalized
       try {
         const testPrivKey = toBigIntFlexible(this.identity.keypair.privKey);
         const testPubKey = toBigIntFlexible(this.identity.keypair.pubKey);
         if (typeof testPrivKey === 'bigint' && typeof testPubKey === 'bigint') {
-          return this.identity;
+          // If wallet is provided, check if identity was derived from this wallet
+          if (walletAddress && this.identity.derivedFromWallet) {
+            if (this.identity.derivedFromWallet === walletAddress) {
+              console.log('[AuthService] Using existing deterministic identity for wallet:', walletAddress);
+              return this.identity;
+            } else {
+              console.warn('[AuthService] Wallet changed, need to re-derive identity');
+              console.warn('[AuthService] Previous wallet:', this.identity.derivedFromWallet);
+              console.warn('[AuthService] Current wallet:', walletAddress);
+              this.clearIdentity();
+            }
+          } else {
+            // Legacy identity without wallet derivation
+            // If a wallet is now available, clear this and derive from wallet instead
+            if (wallet && walletAddress && typeof wallet.signMessage === 'function') {
+              console.warn('[AuthService] Legacy identity found, but wallet is available. Migrating to wallet-derived identity...');
+              this.clearIdentity();
+            } else {
+              // No wallet available, keep using legacy identity
+              console.warn('[AuthService] Using legacy identity (not wallet-derived)');
+              return this.identity;
+            }
+          }
+        } else {
+          console.warn('[AuthService] Identity keys are corrupted, regenerating...');
         }
-        console.warn('[AuthService] Identity keys are corrupted, regenerating...');
       } catch (e) {
         console.warn('[AuthService] Identity validation failed, regenerating...', e);
       }
@@ -285,23 +363,49 @@ class AuthService {
     }
 
     let identity = null;
-    try {
-      if (!sdk) {
-        const _sdk = window.CipherPaySDK || window.parent?.CipherPaySDK;
-        if (_sdk) sdk = _sdk;
+    
+    // PRIORITY 1: Derive from wallet (most secure and portable)
+    if (wallet && walletAddress && typeof wallet.signMessage === 'function') {
+      try {
+        console.log('[AuthService] Attempting deterministic derivation from wallet...');
+        identity = await this.deriveIdentityFromWallet(wallet, walletAddress);
+        console.log('[AuthService] Successfully derived identity from wallet');
+      } catch (error) {
+        console.error('[AuthService] Wallet derivation failed:', error);
+        // Fall through to other methods
       }
-      if (sdk && typeof sdk.getIdentity === 'function') {
-        identity = await sdk.getIdentity();
-      }
-    } catch {}
-
+    }
+    
+    // PRIORITY 2: Try SDK getIdentity (if available)
     if (!identity) {
+      try {
+        if (!sdk) {
+          const _sdk = window.CipherPaySDK || window.parent?.CipherPaySDK;
+          if (_sdk) sdk = _sdk;
+        }
+        if (sdk && typeof sdk.getIdentity === 'function') {
+          identity = await sdk.getIdentity();
+          console.log('[AuthService] Got identity from SDK');
+        }
+      } catch (e) {
+        console.warn('[AuthService] SDK getIdentity failed:', e);
+      }
+    }
+
+    // PRIORITY 3: Generate random identity as last resort (not portable)
+    if (!identity) {
+      console.warn('[AuthService] Generating random identity (not portable across devices)');
+      // Generate distinct random field elements for public and private keys
       const privKey = BigInt(
         '0x' +
           crypto.getRandomValues(new Uint8Array(32))
             .reduce((a, b) => a + b.toString(16).padStart(2, '0'), '')
       );
-      const pubKey = privKey; // placeholder demo identity
+      const pubKey = BigInt(
+        '0x' +
+          crypto.getRandomValues(new Uint8Array(32))
+            .reduce((a, b) => a + b.toString(16).padStart(2, '0'), '')
+      );
       identity = { keypair: { privKey, pubKey } };
     }
 
@@ -521,13 +625,15 @@ class AuthService {
     }
   }
 
-  async authenticate(sdk = null, solanaWalletAddress = null) {
+  async authenticate(sdk = null, solanaWalletAddress = null, solanaWallet = null) {
     try {
-      console.log('[AuthService] ====== AUTHENTICATE CALLED (v2) ======');
+      console.log('[AuthService] ====== AUTHENTICATE CALLED (v3 with wallet) ======');
       console.log('[AuthService] Starting authentication flow');
       console.log('[AuthService] Server URL:', SERVER_URL);
       console.log('[AuthService] ====== WALLET ADDRESS DEBUG ======');
       console.log('[AuthService] Solana wallet address parameter:', solanaWalletAddress);
+      console.log('[AuthService] Solana wallet adapter provided:', !!solanaWallet);
+      console.log('[AuthService] Solana wallet has signMessage:', typeof solanaWallet?.adapter?.signMessage);
       console.log('[AuthService] Solana wallet address type:', typeof solanaWalletAddress);
       console.log('[AuthService] Solana wallet address is null?', solanaWalletAddress === null);
       console.log('[AuthService] Solana wallet address is undefined?', solanaWalletAddress === undefined);
@@ -571,7 +677,9 @@ class AuthService {
       console.log('[AuthService] Will send to backend:', !!solanaWalletAddress);
       console.log('[AuthService] ====== END WALLET ADDRESS DEBUG ======');
 
-      const identity = await this.getOrCreateIdentity(sdk);
+      // Get or create identity - prioritize wallet-derived identity for security
+      const walletAdapter = solanaWallet?.adapter || solanaWallet;
+      const identity = await this.getOrCreateIdentity(sdk, walletAdapter, solanaWalletAddress);
       console.log('[AuthService] Identity created/retrieved');
 
       const ownerKey = await this.getOwnerCipherPayPubKey(identity);

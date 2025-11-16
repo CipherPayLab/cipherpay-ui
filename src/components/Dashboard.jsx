@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
+import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import SolanaStatus from './SolanaStatus';
 import SDKStatus from './SDKStatus';
 
 function Dashboard() {
   const navigate = useNavigate();
+  const { connection } = useConnection();
+  const wallet = useWallet();
   const {
     isInitialized,
     isConnected,
@@ -19,6 +22,7 @@ function Dashboard() {
     signOut,
     refreshData,
     createDeposit,
+    approveRelayerDelegate,
     createTransfer,
     createWithdraw
   } = useCipherPay();
@@ -27,11 +31,14 @@ function Dashboard() {
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [showApproveModal, setShowApproveModal] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
+  const [approveAmount, setApproveAmount] = useState('10'); // Default approval for 10 SOL
   const [transferAmount, setTransferAmount] = useState('');
   const [transferRecipient, setTransferRecipient] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawRecipient, setWithdrawRecipient] = useState('');
+  const [isDelegateApproved, setIsDelegateApproved] = useState(false);
 
   const hasRedirected = useRef(false);
   const hasRefreshed = useRef(false);
@@ -101,22 +108,81 @@ function Dashboard() {
     return Number(balance) / 1e9; // Convert lamports to SOL
   };
 
+  const handleApproveDelegate = async () => {
+    if (!approveAmount || parseFloat(approveAmount) <= 0) {
+      alert('Please enter a valid approval amount');
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const amountInLamports = BigInt(Math.floor(parseFloat(approveAmount) * 1e9));
+      
+      const approvalParams = {
+        connection,
+        wallet,
+        tokenMint: 'So11111111111111111111111111111111111111112', // Native SOL (Wrapped SOL)
+        amount: amountInLamports,
+      };
+      
+      console.log('[Dashboard] Approving relayer delegate with params:', approvalParams);
+      const result = await approveRelayerDelegate(approvalParams);
+      console.log('[Dashboard] Delegate approval successful:', result);
+      
+      setIsDelegateApproved(true);
+      setShowApproveModal(false);
+      setApproveAmount('10');
+      
+      alert(`Delegate approved! You can now make deposits. Transaction: ${result?.signature || 'success'}`);
+    } catch (err) {
+      console.error('[Dashboard] Failed to approve delegate:', err);
+      alert(`Delegate approval failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleDeposit = async () => {
     if (!depositAmount || parseFloat(depositAmount) <= 0) {
       alert('Please enter a valid deposit amount');
       return;
     }
+    
+    // Check if delegate approval is needed
+    if (!isDelegateApproved) {
+      const shouldApprove = confirm('You need to approve the relayer as a delegate before making your first deposit. Would you like to approve now?');
+      if (shouldApprove) {
+        setShowDepositModal(false);
+        setShowApproveModal(true);
+        return;
+      } else {
+        return;
+      }
+    }
+    
     try {
       setActionLoading(true);
       const amountInLamports = BigInt(Math.floor(parseFloat(depositAmount) * 1e9));
-      const txHash = await createDeposit(amountInLamports);
-      console.log('Deposit successful:', txHash);
+      
+      // Prepare deposit parameters with proper structure
+      const depositParams = {
+        amount: amountInLamports,
+        tokenMint: 'So11111111111111111111111111111111111111112', // Native SOL (Wrapped SOL)
+        tokenSymbol: 'SOL',
+        decimals: 9,
+        memo: 0,
+      };
+      
+      console.log('[Dashboard] Creating deposit with params:', depositParams);
+      const result = await createDeposit(depositParams);
+      console.log('[Dashboard] Deposit successful:', result);
+      
       setShowDepositModal(false);
       setDepositAmount('');
       await refreshData();
-      alert(`Deposit successful! Transaction: ${txHash?.txHash || txHash || 'pending'}`);
+      
+      alert(`Deposit successful! Transaction: ${result?.txHash || result?.signature || 'pending'}`);
     } catch (err) {
-      console.error('Failed to deposit:', err);
+      console.error('[Dashboard] Failed to deposit:', err);
       alert(`Deposit failed: ${err.message || 'Unknown error'}`);
     } finally {
       setActionLoading(false);
@@ -258,6 +324,31 @@ function Dashboard() {
         <div className="bg-white overflow-hidden shadow rounded-lg mb-6">
           <div className="px-4 py-5 sm:p-6">
             <h2 className="text-lg font-medium text-gray-900 mb-4">Actions</h2>
+            
+            {/* Show approve delegate button if not approved */}
+            {!isDelegateApproved && (
+              <div className="mb-4 p-4 bg-yellow-50 border-l-4 border-yellow-400 rounded">
+                <div className="flex">
+                  <div className="flex-shrink-0">
+                    <svg className="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <div className="ml-3">
+                    <p className="text-sm text-yellow-700">
+                      Before making your first deposit, you need to approve the relayer as a delegate for your tokens.
+                      <button
+                        onClick={() => setShowApproveModal(true)}
+                        className="ml-2 font-medium underline text-yellow-700 hover:text-yellow-600"
+                      >
+                        Approve Now
+                      </button>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+            
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Deposit */}
               <button
@@ -363,6 +454,56 @@ function Dashboard() {
             )}
           </div>
         </div>
+
+        {/* Approve Delegate Modal */}
+        {showApproveModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowApproveModal(false)}>
+            <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white" onClick={(e) => e.stopPropagation()}>
+              <div className="mt-3">
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Approve Relayer Delegate</h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  This is a one-time setup that allows the relayer to process deposits on your behalf. 
+                  You're approving the relayer to spend up to the specified amount of tokens from your wallet.
+                </p>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Approval Amount (SOL)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={approveAmount}
+                    onChange={(e) => setApproveAmount(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                    placeholder="10.0"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Recommended: Approve enough for multiple deposits to avoid frequent approvals
+                  </p>
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowApproveModal(false);
+                      setApproveAmount('10');
+                    }}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleApproveDelegate}
+                    disabled={actionLoading || !approveAmount}
+                    className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading ? 'Processing...' : 'Approve Delegate'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Deposit Modal */}
         {showDepositModal && (

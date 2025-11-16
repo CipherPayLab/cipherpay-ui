@@ -1,0 +1,5 @@
+{
+  "wasm": "./deposit.wasm",
+  "zkey": "./deposit_final.zkey",
+  "vkey": "./deposit_vkey.json"
+}
