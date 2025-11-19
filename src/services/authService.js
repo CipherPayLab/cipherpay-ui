@@ -1,6 +1,6 @@
 // Auth Service - Handles authentication with cipherpay-server
 import axios from 'axios';
-import { poseidonHash } from '../lib/sdk';
+import { poseidonHashForAuth } from '../lib/sdk';
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
 
 /* ---------------- BigInt/bytes normalizers ---------------- */
@@ -298,11 +298,11 @@ class AuthService {
       const seed = BigInt('0x' + signatureHex);
       
       // Generate privKey: Hash(seed, 1)
-      const privKeySeed = await poseidonHash([seed % BigInt('0x' + 'f'.repeat(64)), 1n]);
+      const privKeySeed = await poseidonHashForAuth([seed % BigInt('0x' + 'f'.repeat(64)), 1n]);
       const privKey = privKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001'); // BN254 field modulus
       
       // Generate pubKey: Hash(seed, 2)
-      const pubKeySeed = await poseidonHash([seed % BigInt('0x' + 'f'.repeat(64)), 2n]);
+      const pubKeySeed = await poseidonHashForAuth([seed % BigInt('0x' + 'f'.repeat(64)), 2n]);
       const pubKey = pubKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001');
       
       console.log('[AuthService] Derived deterministic identity with distinct keys');
@@ -419,7 +419,7 @@ class AuthService {
     let { pubKey, privKey } = identity.keypair ?? {};
     pubKey  = toBigIntFlexible(pubKey);
     privKey = toBigIntFlexible(privKey);
-    const recipientCipherPayPubKey = await poseidonHash([pubKey, privKey]);
+    const recipientCipherPayPubKey = await poseidonHashForAuth([pubKey, privKey]);
     return '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
   }
 
@@ -704,7 +704,7 @@ class AuthService {
         ownerKey: ownerKey,
         ownerKeyBigInt: ownerKeyBI.toString(),
       });
-      const msgField = await poseidonHash([nonceBI, ownerKeyBI]);
+      const msgField = await poseidonHashForAuth([nonceBI, ownerKeyBI]);
       console.log('[AuthService] Message field computed:', msgField.toString());
 
       console.log('[AuthService] Signing message...');

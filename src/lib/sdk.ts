@@ -5,6 +5,7 @@ type SDKShape = {
   TOKENS: Record<string, unknown>;
   bigintifySignals: (s: Record<string, unknown>) => Record<string, bigint>;
   poseidonHash: (inputs: Array<bigint | number | string>) => Promise<bigint>;
+  poseidonHashForAuth: (inputs: Array<bigint | number | string>) => Promise<bigint>;
   commitmentOf: (
     input:
       | Array<bigint | number | string>
@@ -154,6 +155,35 @@ export async function bigintifySignals(s: Record<string, unknown>) {
 
 export async function TOKENS() {
   return (await getSDK()).TOKENS;
+}
+
+export async function poseidonHashForAuth(inputs: Array<bigint | number | string>) {
+  const sdk = await getSDK();
+  if (!sdk || typeof sdk.poseidonHashForAuth !== 'function') {
+    throw new Error('poseidonHashForAuth is not available on CipherPaySDK. Ensure the SDK bundle is loaded correctly.');
+  }
+  
+  // Sanitize inputs (same as poseidonHash)
+  const sanitizedInputs = inputs.map((v) => {
+    if (typeof v === 'bigint') return v;
+    if (typeof v === 'number') return BigInt(v);
+    if (typeof v === 'string') {
+      if (v.includes(',') && /^\d+(,\d+)+$/.test(v)) {
+        const nums = v.split(',').map(x => parseInt(x, 10));
+        const hex = nums.map(b => b.toString(16).padStart(2, '0')).join('');
+        return BigInt('0x' + hex);
+      }
+      if (v.startsWith('0x') || v.startsWith('0X')) return BigInt(v);
+      return BigInt(v);
+    }
+    if (Array.isArray(v)) {
+      const hex = v.map(b => Number(b).toString(16).padStart(2, '0')).join('');
+      return BigInt('0x' + hex);
+    }
+    return BigInt(String(v));
+  });
+  
+  return await sdk.poseidonHashForAuth(sanitizedInputs);
 }
 
 
