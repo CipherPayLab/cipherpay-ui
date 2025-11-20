@@ -1,6 +1,6 @@
 # CipherPay Services
 
-This directory contains the service layer for the CipherPay UI, with a flexible service selection mechanism.
+This directory contains the service layer for the CipherPay UI.
 
 ## Service Files
 
@@ -13,41 +13,9 @@ This directory contains the service layer for the CipherPay UI, with a flexible 
   - ZK proof generation and verification
   - Event monitoring and compliance
 
-### `FallbackCipherPayService.js` - Development Service
-- **Purpose**: Mock implementations for development and testing
-- **Use Case**: Development, testing, when SDK is unavailable
-- **Features**:
-  - Mock wallet provider with test addresses
-  - Mock note management with sample data
-  - Mock ZK proof generation and verification
-  - Graceful degradation when real SDK fails
-
-### `index.js` - Service Selection
-- **Purpose**: Automatically selects the appropriate service based on environment variables
-- **Logic**: 
-  - Uses `CipherPayService` when `REACT_APP_USE_REAL_SDK=true`
-  - Uses `FallbackCipherPayService` when `REACT_APP_USE_FALLBACK_SERVICE=true`
-  - Defaults to `FallbackCipherPayService` if no environment variables are set
-
-## Environment Variables
-
-### For Production (Real SDK)
-```bash
-REACT_APP_USE_REAL_SDK=true
-REACT_APP_USE_FALLBACK_SERVICE=false  # Optional, defaults to false
-```
-
-### For Development (Fallback Service)
-```bash
-REACT_APP_USE_FALLBACK_SERVICE=true
-REACT_APP_USE_REAL_SDK=false  # Optional, defaults to false
-```
-
-### For Auto-Selection (Recommended)
-```bash
-# Let the service selection mechanism decide based on SDK availability
-# No environment variables needed - will use fallback by default
-```
+### `index.js` - Service Export
+- **Purpose**: Exports the CipherPay service instance
+- **Usage**: Import the service from this directory
 
 ## Usage
 
@@ -55,27 +23,18 @@ REACT_APP_USE_REAL_SDK=false  # Optional, defaults to false
 ```javascript
 import cipherPayService from '../services';
 
-// The service is automatically selected based on environment variables
+// Initialize and use the service
 await cipherPayService.initialize();
 ```
 
 ### Direct Import (Advanced)
 ```javascript
-import { CipherPayService, FallbackCipherPayService } from '../services';
+import { CipherPayService } from '../services';
 
-// Create specific service instances if needed
-const realService = new CipherPayService();
-const fallbackService = new FallbackCipherPayService();
+// Create a specific service instance if needed
+const service = new CipherPayService();
 ```
 
-## Service Selection Logic
+## Requirements
 
-1. **Check `REACT_APP_USE_FALLBACK_SERVICE`**: If `true`, use `FallbackCipherPayService`
-2. **Check `REACT_APP_USE_REAL_SDK`**: If `true`, use `CipherPayService`
-3. **Default**: Use `FallbackCipherPayService` for safety
-
-This ensures that:
-- Development can continue even if the SDK is not available
-- Production can use the real SDK when available
-- The system gracefully degrades when needed
-- Clear separation of concerns between real and mock implementations 
+The CipherPay SDK must be loaded in the application (typically via script tag in `index.html`) for the service to function properly. 

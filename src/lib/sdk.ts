@@ -5,6 +5,7 @@ type SDKShape = {
   TOKENS: Record<string, unknown>;
   bigintifySignals: (s: Record<string, unknown>) => Record<string, bigint>;
   poseidonHash: (inputs: Array<bigint | number | string>) => Promise<bigint>;
+  poseidonHashForAuth: (inputs: Array<bigint | number | string>) => Promise<bigint>;
   commitmentOf: (
     input:
       | Array<bigint | number | string>
@@ -23,20 +24,32 @@ export async function getSDK(): Promise<SDKShape> {
   if (cached) return cached;
   if (typeof window !== "undefined" && window.CipherPaySDK) {
     const sdk = window.CipherPaySDK;
-    console.log('[SDK] Found window.CipherPaySDK:', typeof sdk, Object.keys(sdk || {}));
-    // Check if it's an object with exports
-    if (sdk && typeof sdk === 'object') {
-      cached = sdk as unknown as SDKShape;
-      console.log('[SDK] Cached SDK object, has poseidonHash:', typeof cached.poseidonHash);
-      return cached;
+    console.log('[SDK] Found window.CipherPaySDK:', typeof sdk);
+    
+    // CipherPaySDK can be either:
+    // 1. A function (class constructor) with utility methods as properties
+    // 2. An object with utility methods
+    
+    if (sdk && (typeof sdk === 'object' || typeof sdk === 'function')) {
+      // Check if utility functions are available
+      const hasUtils = typeof sdk.poseidonHash === 'function' && 
+                       typeof sdk.commitmentOf === 'function';
+      
+      console.log('[SDK] SDK has utility functions:', hasUtils);
+      console.log('[SDK] Available properties:', Object.keys(sdk).filter(k => typeof sdk[k] === 'function'));
+      
+      if (hasUtils) {
+        cached = sdk as unknown as SDKShape;
+        console.log('[SDK] Cached SDK, ready to use');
+        return cached;
+      }
     }
   }
   
   // In browser, we should always use window.CipherPaySDK (loaded via script tag)
-  // Don't try to import cipherpay-sdk module - it's not available in browser build
-  // The browser bundle is loaded via <script> tag in index.html
-  // Vite will try to statically analyze imports, so we avoid dynamic import here
-  console.error('[SDK] CipherPaySDK not found on window object');
+  console.error('[SDK] CipherPaySDK not found or missing utility functions');
+  console.error('[SDK] window.CipherPaySDK type:', typeof window?.CipherPaySDK);
+  console.error('[SDK] Available on window.CipherPaySDK:', window?.CipherPaySDK ? Object.keys(window.CipherPaySDK) : 'null');
   throw new Error(
     "CipherPaySDK not available. Ensure postinstall copied browser bundle to public/sdk and index.html includes it."
   );
@@ -142,6 +155,35 @@ export async function bigintifySignals(s: Record<string, unknown>) {
 
 export async function TOKENS() {
   return (await getSDK()).TOKENS;
+}
+
+export async function poseidonHashForAuth(inputs: Array<bigint | number | string>) {
+  const sdk = await getSDK();
+  if (!sdk || typeof sdk.poseidonHashForAuth !== 'function') {
+    throw new Error('poseidonHashForAuth is not available on CipherPaySDK. Ensure the SDK bundle is loaded correctly.');
+  }
+  
+  // Sanitize inputs (same as poseidonHash)
+  const sanitizedInputs = inputs.map((v) => {
+    if (typeof v === 'bigint') return v;
+    if (typeof v === 'number') return BigInt(v);
+    if (typeof v === 'string') {
+      if (v.includes(',') && /^\d+(,\d+)+$/.test(v)) {
+        const nums = v.split(',').map(x => parseInt(x, 10));
+        const hex = nums.map(b => b.toString(16).padStart(2, '0')).join('');
+        return BigInt('0x' + hex);
+      }
+      if (v.startsWith('0x') || v.startsWith('0X')) return BigInt(v);
+      return BigInt(v);
+    }
+    if (Array.isArray(v)) {
+      const hex = v.map(b => Number(b).toString(16).padStart(2, '0')).join('');
+      return BigInt('0x' + hex);
+    }
+    return BigInt(String(v));
+  });
+  
+  return await sdk.poseidonHashForAuth(sanitizedInputs);
 }
 
 

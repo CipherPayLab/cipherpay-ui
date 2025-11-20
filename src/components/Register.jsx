@@ -11,22 +11,23 @@ function Register() {
     isAuthenticated,
     connectWallet,
     signUp,
-    createDeposit,
     loading,
     error,
     clearError
   } = useCipherPay();
 
-  const [registrationStep, setRegistrationStep] = useState('form'); // form, wallet-selection, authenticating, deposit, success
-  const [depositAmount, setDepositAmount] = useState('');
-  const [depositHash, setDepositHash] = useState('');
+  const [registrationStep, setRegistrationStep] = useState('form'); // form, wallet-selection, authenticating, success
   const [isConnecting, setIsConnecting] = useState(false);
 
   useEffect(() => {
     if (isAuthenticated) {
-      setRegistrationStep('deposit');
+      setRegistrationStep('success');
+      // Redirect to dashboard after 2 seconds
+      setTimeout(() => {
+        navigate('/dashboard');
+      }, 2000);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, navigate]);
 
   const handleSignUp = (e) => {
     e.preventDefault();
@@ -61,14 +62,17 @@ function Register() {
       setRegistrationStep('authenticating');
       clearError();
       
+      console.log('[Register] handleWalletConnected: walletAddress parameter:', walletAddress);
+      
       // Connect wallet to CipherPay service using the selected wallet address
       if (!isConnected) {
         await connectWallet();
       }
       
       // Sign up (creates identity and authenticates)
-      await signUp();
-      // After successful signup, move to deposit step
+      // Pass the wallet address directly to ensure it's used
+      await signUp(walletAddress);
+      // After successful signup, redirect to dashboard
       // The useEffect will handle this via isAuthenticated
     } catch (err) {
       console.error('Failed to connect wallet and sign up:', err);
@@ -82,41 +86,6 @@ function Register() {
   const handleWalletDisconnected = () => {
     // Wallet disconnected - clear any errors
     clearError();
-  };
-
-  const handleDeposit = async (e) => {
-    e.preventDefault();
-
-    if (!isAuthenticated) {
-      alert('Please complete authentication first');
-      return;
-    }
-
-    if (!depositAmount || Number(depositAmount) <= 0) {
-      alert('Please enter a valid deposit amount');
-      return;
-    }
-
-    try {
-      clearError();
-      setRegistrationStep('depositing');
-
-      const amountInLamports = BigInt(Math.floor(parseFloat(depositAmount) * 1e9));
-      const txHash = await createDeposit(amountInLamports);
-      const txHashStr = txHash?.txHash || txHash || 'pending';
-      setDepositHash(txHashStr);
-      setRegistrationStep('success');
-
-      // Redirect to dashboard after successful registration
-      setTimeout(() => {
-        navigate('/dashboard');
-      }, 3000);
-
-    } catch (err) {
-      console.error('Deposit failed:', err);
-      alert(`Deposit failed: ${err.message || 'Unknown error'}`);
-      setRegistrationStep('deposit');
-    }
   };
 
   if (loading && !isInitialized) {
@@ -239,64 +208,6 @@ function Register() {
           </div>
         )}
 
-        {/* Deposit Step */}
-        {registrationStep === 'deposit' && (
-          <div className="mt-8 space-y-6">
-            <div className="bg-green-50 border border-green-200 rounded-md p-4">
-              <div className="flex">
-                <div className="ml-3">
-                  <h3 className="text-sm font-medium text-green-800">Account Created!</h3>
-                  <div className="mt-2 text-sm text-green-700">
-                    <p>Your CipherPay account has been created. Now let's make your first deposit.</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <form className="space-y-6" onSubmit={handleDeposit}>
-              <div>
-                <label htmlFor="depositAmount" className="block text-sm font-medium text-gray-700">
-                  Initial Deposit Amount (SOL)
-                </label>
-                <input
-                  id="depositAmount"
-                  name="depositAmount"
-                  type="number"
-                  step="0.001"
-                  required
-                  value={depositAmount}
-                  onChange={(e) => setDepositAmount(e.target.value)}
-                  className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                  placeholder="0.1"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  This will be your initial shielded balance for privacy-preserving transactions.
-                </p>
-              </div>
-              <div>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-                >
-                  {loading ? 'Processing...' : 'Make Deposit'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Deposit Progress */}
-        {registrationStep === 'depositing' && (
-          <div className="mt-8 space-y-6">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
-              <h3 className="text-lg font-medium text-gray-900">Processing Deposit</h3>
-              <p className="text-gray-600">Please wait while we process your deposit...</p>
-            </div>
-          </div>
-        )}
-
         {/* Success Message */}
         {registrationStep === 'success' && (
           <div className="mt-8 space-y-6">
@@ -307,13 +218,7 @@ function Register() {
                 </svg>
               </div>
               <h3 className="text-lg font-medium text-gray-900">Registration Successful!</h3>
-              <p className="text-gray-600 mb-4">Your CipherPay account has been created and your deposit is being processed.</p>
-              {depositHash && (
-                <div className="bg-gray-50 p-4 rounded-lg">
-                  <p className="text-sm text-gray-600">Deposit Transaction Hash:</p>
-                  <p className="text-sm font-mono text-gray-900 break-all">{depositHash}</p>
-                </div>
-              )}
+              <p className="text-gray-600 mb-4">Your CipherPay account has been created successfully.</p>
               <p className="text-sm text-gray-500 mt-4">Redirecting to dashboard...</p>
             </div>
           </div>

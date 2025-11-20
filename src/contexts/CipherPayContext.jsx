@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { useWallet } from '@solana/wallet-adapter-react';
+import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import cipherPayService from '../services';
 import authService from '../services/authService';
 
@@ -15,7 +15,8 @@ export const useCipherPay = () => {
 
 export const CipherPayProvider = ({ children }) => {
     // Get Solana wallet adapter state
-    const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect } = useWallet();
+    const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect, sendTransaction } = useWallet();
+    const { connection } = useConnection();
     
     const [isInitialized, setIsInitialized] = useState(false);
     const [isConnected, setIsConnected] = useState(false);
@@ -121,12 +122,47 @@ export const CipherPayProvider = ({ children }) => {
             setPublicAddress(status.publicAddress);
         }
 
+        // Try to get account overview from backend (decrypts messages.ciphertext)
+        // Falls back to SDK's in-memory note manager if backend fails
+        // Check auth token directly instead of isAuthenticated state (which may not be updated yet)
+        const authToken = localStorage.getItem('cipherpay_token');
+        const isAuthTokenPresent = !!authToken;
+        
+        try {
+            console.log('[CipherPayContext] updateServiceStatus: isAuthenticated =', isAuthenticated, 'authToken present =', isAuthTokenPresent);
+            if (isAuthTokenPresent) {
+                console.log('[CipherPayContext] updateServiceStatus: Attempting to get account overview from backend...');
+                const backendOverview = await cipherPayService.getAccountOverviewFromBackend({ checkOnChain: false });
+                
+                console.log('[CipherPayContext] updateServiceStatus: Got account overview from backend:', backendOverview);
+                // Update balance from backend overview (even if 0)
+                setBalance(backendOverview.shieldedBalance || 0n);
+                // Update notes from backend overview (even if empty)
+                const spendable = (backendOverview.notes || []).filter(n => !n.isSpent);
+                setSpendableNotes(spendable);
+                setAllNotes((backendOverview.notes || []).map(n => ({
+                    ...n.note,
+                    commitment: n.nullifierHex, // Use nullifier hex as identifier
+                    spent: n.isSpent,
+                    amount: n.amount,
+                })));
+                console.log('[CipherPayContext] updateServiceStatus: Updated from backend overview - balance:', backendOverview.shieldedBalance, 'notes:', backendOverview.notes?.length || 0);
+                return; // Early return, skip SDK fallback
+            } else {
+                console.log('[CipherPayContext] updateServiceStatus: No auth token, skipping backend account overview');
+            }
+        } catch (error) {
+            console.warn('[CipherPayContext] updateServiceStatus: Failed to get account overview from backend, falling back to SDK:', error);
+            console.warn('[CipherPayContext] updateServiceStatus: Error details:', error.message, error.stack);
+        }
+
+        // Fallback to SDK's in-memory note manager
         if (status.balance !== undefined) {
             console.log('[CipherPayContext] updateServiceStatus: Setting balance to:', status.balance);
             setBalance(status.balance);
         }
 
-        // Update notes
+        // Update notes from SDK
         setSpendableNotes(cipherPayService.getSpendableNotes());
         const notes = await cipherPayService.getAllNotes();
         setAllNotes(Array.isArray(notes) ? notes : []);
@@ -156,32 +192,34 @@ export const CipherPayProvider = ({ children }) => {
                 // Ignore sessionStorage errors
             }
             
+            let walletAddress = null;
+            
             // If Solana wallet is connected, use its address
             if (solanaConnected && solanaPublicKey) {
-                const address = solanaPublicKey.toBase58();
-                console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', address);
+                walletAddress = solanaPublicKey.toBase58();
+                console.log('[CipherPayContext] connectWallet: Using Solana wallet address:', walletAddress);
                 
                 if (cipherPayService.setWalletAddress) {
-                    cipherPayService.setWalletAddress(address);
+                    cipherPayService.setWalletAddress(walletAddress);
                     // Ensure service internal connection flag is set as well
                     if (cipherPayService.connectWallet) {
-                        await cipherPayService.connectWallet(address);
+                        await cipherPayService.connectWallet(walletAddress);
                     }
                 } else {
                     // Fallback: try to connect through service with wallet address
-                    await cipherPayService.connectWallet(address);
+                    await cipherPayService.connectWallet(walletAddress);
                 }
                 
-                setPublicAddress(address);
+                setPublicAddress(walletAddress);
                 setIsConnected(true);
-                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', walletAddress);
             } else {
                 // Fallback to service's connectWallet (for mock or SDK)
-                const address = await cipherPayService.connectWallet();
-                console.log('[CipherPayContext] connectWallet: SDK returned address:', address);
-                setPublicAddress(address);
+                walletAddress = await cipherPayService.connectWallet();
+                console.log('[CipherPayContext] connectWallet: SDK returned address:', walletAddress);
+                setPublicAddress(walletAddress);
                 setIsConnected(true);
-                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', address);
+                console.log('[CipherPayContext] connectWallet: setIsConnected(true), address:', walletAddress);
             }
 
             // Add a small delay to ensure service state is updated
@@ -191,7 +229,22 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] connectWallet: About to call updateServiceStatus...');
             await updateServiceStatus();
             console.log('[CipherPayContext] connectWallet: updateServiceStatus completed');
-            return publicAddress || solanaPublicKey?.toBase58();
+            
+            // Store wallet address for use in authentication
+            if (walletAddress) {
+                try {
+                    sessionStorage.setItem('cipherpay_wallet_address', walletAddress);
+                    console.log('[CipherPayContext] ====== STORED WALLET ADDRESS (v2) ======');
+                    console.log('[CipherPayContext] connectWallet: Stored wallet address in sessionStorage:', walletAddress);
+                    console.log('[CipherPayContext] ====== END STORED WALLET ADDRESS ======');
+                } catch (e) {
+                    console.warn('[CipherPayContext] connectWallet: Failed to store wallet address in sessionStorage:', e);
+                }
+            } else {
+                console.warn('[CipherPayContext] connectWallet: No wallet address to store');
+            }
+            
+            return walletAddress;
         } catch (err) {
             console.error('[CipherPayContext] connectWallet: Error occurred:', err);
             setError(err.message);
@@ -280,15 +333,72 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    // Deposit Management
-    const createDeposit = async (amount) => {
+    // Delegate Approval (One-time setup before first deposit)
+    const approveRelayerDelegate = async (params) => {
         try {
             setLoading(true);
             setError(null);
-            const txHash = await cipherPayService.createDeposit(amount);
-            await updateServiceStatus(); // Refresh balance and notes
-            return txHash;
+            
+            // Validate that required parameters are provided
+            if (!params.connection) {
+                throw new Error('Connection is required');
+            }
+            if (!params.wallet || !params.wallet.publicKey) {
+                throw new Error('Please connect your wallet first');
+            }
+            
+            console.log('[CipherPayContext] approveRelayerDelegate: Calling service with params:', {
+                connection: !!params.connection,
+                wallet: !!params.wallet,
+                walletPublicKey: params.wallet?.publicKey?.toString(),
+                tokenMint: params.tokenMint,
+                amount: params.amount?.toString()
+            });
+            
+            const result = await cipherPayService.approveRelayerDelegate(params);
+            
+            console.log('[CipherPayContext] approveRelayerDelegate: Result:', result);
+            
+            return result;
         } catch (err) {
+            console.error('[CipherPayContext] approveRelayerDelegate: Error:', err);
+            setError(err.message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Deposit Management (calls server APIs via SDK)
+    const createDeposit = async (params) => {
+        try {
+            setLoading(true);
+            setError(null);
+            
+            // Validate authentication (needed for server API calls)
+            if (!isAuthenticated) {
+                throw new Error('Please authenticate first');
+            }
+            
+            // Prepare deposit parameters (SDK will call server APIs)
+            const depositParams = {
+                amount: params.amount,
+                tokenMint: params.tokenMint,
+                tokenSymbol: params.tokenSymbol || 'SOL',
+                decimals: params.decimals || 9,
+                memo: params.memo || 0,
+            };
+            
+            console.log('[CipherPayContext] createDeposit: Calling service with params:', depositParams);
+            
+            const result = await cipherPayService.createDeposit(depositParams);
+            
+            console.log('[CipherPayContext] createDeposit: Result:', result);
+            
+            await updateServiceStatus(); // Refresh balance and notes
+            return result;
+        } catch (err) {
+            console.error('[CipherPayContext] createDeposit: Error:', err);
             setError(err.message);
             throw err;
         } finally {
@@ -390,14 +500,64 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Authentication Management
-    const signIn = async () => {
+    const signIn = async (walletAddressOverride = null) => {
         try {
+            console.log('[CipherPayContext] ====== SIGNIN CALLED (v2) ======');
             setLoading(true);
             setError(null);
-            const result = await authService.authenticate(sdk);
+            // Get Solana wallet address from multiple sources
+            // Priority: 1. Override parameter, 2. sessionStorage, 3. context state, 4. wallet adapter
+            let walletAddr = walletAddressOverride;
+            console.log('[CipherPayContext] signIn: Called with override:', walletAddressOverride);
+            console.log('[CipherPayContext] signIn: Override type:', typeof walletAddressOverride);
+            
+            if (!walletAddr) {
+                try {
+                    walletAddr = sessionStorage.getItem('cipherpay_wallet_address');
+                    console.log('[CipherPayContext] signIn: Retrieved from sessionStorage:', walletAddr);
+                } catch (e) {
+                    console.warn('[CipherPayContext] signIn: Failed to read sessionStorage:', e);
+                }
+            }
+            if (!walletAddr) {
+                walletAddr = publicAddress || solanaPublicKey?.toBase58() || null;
+                console.log('[CipherPayContext] signIn: Using context/wallet adapter:', walletAddr, {
+                    publicAddress,
+                    solanaPublicKey: solanaPublicKey?.toBase58()
+                });
+            }
+            
+            console.log('[CipherPayContext] signIn: Final wallet address to use:', walletAddr);
+            console.log('[CipherPayContext] signIn: About to call authService.authenticate with wallet address:', walletAddr);
+            console.log('[CipherPayContext] signIn: Solana wallet available:', !!solanaWallet);
+            
+            await authService.authenticate(sdk, walletAddr, solanaWallet);
             setIsAuthenticated(true);
-            setAuthUser(result.user);
-            return result;
+            // Get user from localStorage (stored by authService.setAuthToken)
+            const storedUser = localStorage.getItem('cipherpay_user');
+            let user = null;
+            if (storedUser) {
+                try {
+                    user = JSON.parse(storedUser);
+                    setAuthUser(user);
+                } catch (e) {
+                    console.warn('[CipherPayContext] signIn: Failed to parse stored user:', e);
+                }
+            }
+            
+            // Start event monitoring for this user
+            if (user?.ownerCipherPayPubKey) {
+                console.log('[CipherPayContext] signIn: Starting event monitoring for user:', user.ownerCipherPayPubKey);
+                await cipherPayService.startEventMonitoring(user.ownerCipherPayPubKey);
+            }
+            
+            // Refresh account overview from backend after authentication
+            // Use setTimeout to ensure token is stored and state has updated
+            setTimeout(() => {
+                console.log('[CipherPayContext] signIn: Triggering account overview refresh after authentication');
+                updateServiceStatus();
+            }, 100);
+            return { success: true };
         } catch (err) {
             setError(err.message);
             throw err;
@@ -406,15 +566,58 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    const signUp = async () => {
+    const signUp = async (walletAddressOverride = null) => {
         try {
             setLoading(true);
             setError(null);
             // Sign up is the same as sign in - server creates user on first challenge
-            const result = await authService.authenticate(sdk);
+            // Get Solana wallet address from multiple sources
+            // Priority: 1. Override parameter, 2. sessionStorage, 3. context state, 4. wallet adapter
+            let walletAddr = walletAddressOverride;
+            if (!walletAddr) {
+                try {
+                    walletAddr = sessionStorage.getItem('cipherpay_wallet_address');
+                } catch (e) {
+                    // Ignore sessionStorage errors
+                }
+            }
+            if (!walletAddr) {
+                walletAddr = publicAddress || solanaPublicKey?.toBase58() || null;
+            }
+            console.log('[CipherPayContext] signUp: Using wallet address:', walletAddr, {
+                override: walletAddressOverride,
+                sessionStorage: sessionStorage.getItem('cipherpay_wallet_address'),
+                publicAddress,
+                solanaPublicKey: solanaPublicKey?.toBase58()
+            });
+            console.log('[CipherPayContext] signUp: Solana wallet available:', !!solanaWallet);
+            await authService.authenticate(sdk, walletAddr, solanaWallet);
             setIsAuthenticated(true);
-            setAuthUser(result.user);
-            return result;
+            // Get user from localStorage (stored by authService.setAuthToken)
+            const storedUser = localStorage.getItem('cipherpay_user');
+            let user = null;
+            if (storedUser) {
+                try {
+                    user = JSON.parse(storedUser);
+                    setAuthUser(user);
+                } catch (e) {
+                    console.warn('[CipherPayContext] signUp: Failed to parse stored user:', e);
+                }
+            }
+            
+            // Start event monitoring for this user
+            if (user?.ownerCipherPayPubKey) {
+                console.log('[CipherPayContext] signUp: Starting event monitoring for user:', user.ownerCipherPayPubKey);
+                await cipherPayService.startEventMonitoring(user.ownerCipherPayPubKey);
+            }
+            
+            // Refresh account overview from backend after authentication
+            // Use setTimeout to ensure token is stored and state has updated
+            setTimeout(() => {
+                console.log('[CipherPayContext] signUp: Triggering account overview refresh after authentication');
+                updateServiceStatus();
+            }, 100);
+            return { success: true };
         } catch (err) {
             setError(err.message);
             throw err;
@@ -425,6 +628,9 @@ export const CipherPayProvider = ({ children }) => {
 
     const signOut = async () => {
         try {
+            // Stop event monitoring
+            cipherPayService.stopEventMonitoring();
+            
             authService.clearAuth();
             setIsAuthenticated(false);
             setAuthUser(null);
@@ -498,6 +704,7 @@ export const CipherPayProvider = ({ children }) => {
         checkTransferStatus,
 
         // Deposit Management
+        approveRelayerDelegate, // One-time setup before first deposit
         createDeposit,
 
         // Withdrawal Management
