@@ -406,6 +406,10 @@ class CipherPayService {
                 ownerWalletPubKey: identity.ownerWalletPubKey || BigInt(0),
                 ownerWalletPrivKey: identity.ownerWalletPrivKey || BigInt(0),
                 nonce: BigInt(Date.now() % 1000000), // Simple nonce for now
+                // Delegate mode parameters
+                sourceOwner: params.sourceOwner,
+                sourceTokenAccount: params.sourceTokenAccount,
+                useDelegate: params.useDelegate,
             };
 
             console.log('[CipherPayService] Calling SDK deposit with params:', {
@@ -711,7 +715,12 @@ class CipherPayService {
 
         try {
             const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
-            const eventSource = new EventSource(`${serverUrl}/stream?recipientKey=${recipientKey}`);
+            // EventSource doesn't support custom headers, so pass token as query param if needed
+            const token = localStorage.getItem('cipherpay_token');
+            const url = token 
+                ? `${serverUrl}/stream?recipientKey=${recipientKey}&token=${encodeURIComponent(token)}`
+                : `${serverUrl}/stream?recipientKey=${recipientKey}`;
+            const eventSource = new EventSource(url);
 
             eventSource.onmessage = (event) => {
                 try {

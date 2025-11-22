@@ -39,7 +39,12 @@ export async function fetchMessages(options = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: 'Failed to fetch messages' }));
-    throw new Error(error.message || `HTTP ${response.status}`);
+    const errorMessage = error.message || `HTTP ${response.status}`;
+    if (response.status === 401) {
+      console.warn('[accountOverviewService] 401 Unauthorized - token may be invalid or expired');
+      // Don't throw immediately - let caller handle it
+    }
+    throw new Error(errorMessage);
   }
 
   return await response.json();
