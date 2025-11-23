@@ -29,7 +29,11 @@ export async function fetchMessages(options = {}) {
   params.append('limit', limit.toString());
   params.append('offset', offset.toString());
 
-  const response = await fetch(`${API_BASE_URL}/api/v1/messages?${params}`, {
+  const url = `${API_BASE_URL}/api/v1/messages?${params}`;
+  console.log('[accountOverviewService] Fetching messages from:', url);
+  console.log('[accountOverviewService] Token present:', !!token, 'Token length:', token?.length);
+
+  const response = await fetch(url, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -39,7 +43,29 @@ export async function fetchMessages(options = {}) {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: 'Failed to fetch messages' }));
-    throw new Error(error.message || `HTTP ${response.status}`);
+    const errorMessage = error.message || `HTTP ${response.status}`;
+    if (response.status === 401) {
+      console.warn('[accountOverviewService] 401 Unauthorized - token may be invalid or expired');
+      console.warn('[accountOverviewService] Error details:', error);
+      // Try to decode JWT to check expiration (without verification)
+      try {
+        const tokenParts = token.split('.');
+        if (tokenParts.length === 3) {
+          const payload = JSON.parse(atob(tokenParts[1]));
+          console.warn('[accountOverviewService] Token payload:', { 
+            sub: payload.sub, 
+            ownerKey: payload.ownerKey?.substring(0, 20) + '...',
+            exp: payload.exp,
+            expDate: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+            now: new Date().toISOString(),
+            expired: payload.exp ? Date.now() > payload.exp * 1000 : null
+          });
+        }
+      } catch (e) {
+        console.warn('[accountOverviewService] Could not decode token:', e);
+      }
+    }
+    throw new Error(errorMessage);
   }
 
   return await response.json();

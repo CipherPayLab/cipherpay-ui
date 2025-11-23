@@ -1,6 +1,6 @@
 // Auth Service - Handles authentication with cipherpay-server
 import axios from 'axios';
-import { poseidonHashForAuth } from '../lib/sdk';
+import { poseidonHash, poseidonHashForAuth } from '../lib/sdk';
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
 
 /* ---------------- BigInt/bytes normalizers ---------------- */
@@ -419,7 +419,9 @@ class AuthService {
     let { pubKey, privKey } = identity.keypair ?? {};
     pubKey  = toBigIntFlexible(pubKey);
     privKey = toBigIntFlexible(privKey);
-    const recipientCipherPayPubKey = await poseidonHashForAuth([pubKey, privKey]);
+    // Use poseidonHash (not poseidonHashForAuth) to match note creation
+    // This ensures ownerKey matches ownerCipherPayPubKey in notes
+    const recipientCipherPayPubKey = await poseidonHash([pubKey, privKey]);
     return '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
   }
 
@@ -704,7 +706,8 @@ class AuthService {
         ownerKey: ownerKey,
         ownerKeyBigInt: ownerKeyBI.toString(),
       });
-      const msgField = await poseidonHashForAuth([nonceBI, ownerKeyBI]);
+      // Use poseidonHash (not poseidonHashForAuth) to match server's poseidonLoginMsg
+      const msgField = await poseidonHash([nonceBI, ownerKeyBI]);
       console.log('[AuthService] Message field computed:', msgField.toString());
 
       console.log('[AuthService] Signing message...');

@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction, createSyncNativeInstruction } from '@solana/spl-token';
+import { SystemProgram, Transaction } from '@solana/web3.js';
 import cipherPayService from '../services';
 import authService from '../services/authService';
 
@@ -154,6 +156,12 @@ export const CipherPayProvider = ({ children }) => {
         } catch (error) {
             console.warn('[CipherPayContext] updateServiceStatus: Failed to get account overview from backend, falling back to SDK:', error);
             console.warn('[CipherPayContext] updateServiceStatus: Error details:', error.message, error.stack);
+            
+            // If 401, the token might be invalid - but don't clear it yet, might be a temporary issue
+            if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+                console.warn('[CipherPayContext] updateServiceStatus: 401 error - token may be invalid, but keeping it for now');
+                // Could trigger re-authentication here if needed
+            }
         }
 
         // Fallback to SDK's in-memory note manager
@@ -261,7 +269,7 @@ export const CipherPayProvider = ({ children }) => {
             setError(null);
             // Explicitly clear any persisted auth/session first to avoid immediate re-login loops
             try {
-                localStorage.removeItem('cipherpay_auth_token');
+                localStorage.removeItem('cipherpay_token');
                 sessionStorage.setItem('cipherpay_just_disconnected', '1');
             } catch (e) {
                 console.warn('[CipherPayContext] Unable to clear persisted auth token', e);
@@ -380,6 +388,72 @@ export const CipherPayProvider = ({ children }) => {
                 throw new Error('Please authenticate first');
             }
             
+            // Validate wallet connection
+            if (!solanaConnected || !solanaPublicKey) {
+                throw new Error('Please connect your Solana wallet first');
+            }
+            
+            let sourceOwner = solanaPublicKey.toBase58();
+            let sourceTokenAccount = null;
+            let useDelegate = false;
+            
+            // If depositing SOL/wSOL, wrap SOL to wSOL first
+            if (params.tokenMint === NATIVE_MINT.toBase58() || params.tokenMint === 'So11111111111111111111111111111111111111112') {
+                const { PublicKey } = await import('@solana/web3.js');
+                const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+                const wsolAta = getAssociatedTokenAddressSync(WSOL_MINT, solanaPublicKey, false, TOKEN_PROGRAM_ID);
+                sourceTokenAccount = wsolAta.toBase58();
+                
+                // Check if ATA exists and has enough balance
+                const ataInfo = await connection.getAccountInfo(wsolAta);
+                const requiredLamports = Number(params.amount);
+                
+                // Get current wSOL balance
+                let currentBalance = 0;
+                if (ataInfo) {
+                    try {
+                        const tokenAccount = await connection.getTokenAccountBalance(wsolAta);
+                        currentBalance = Number(tokenAccount.value.amount);
+                    } catch (e) {
+                        // ATA exists but might not be initialized yet
+                        currentBalance = 0;
+                    }
+                }
+                
+                // Wrap SOL to wSOL if needed
+                if (currentBalance < requiredLamports) {
+                    const delta = requiredLamports - currentBalance;
+                    const tx = new Transaction();
+                    
+                    // Create ATA if it doesn't exist
+                    if (!ataInfo) {
+                        tx.add(createAssociatedTokenAccountInstruction(
+                            solanaPublicKey, // payer
+                            wsolAta, // ata
+                            solanaPublicKey, // owner
+                            WSOL_MINT // mint
+                        ));
+                    }
+                    
+                    // Transfer SOL to ATA and sync
+                    tx.add(
+                        SystemProgram.transfer({
+                            fromPubkey: solanaPublicKey,
+                            toPubkey: wsolAta,
+                            lamports: delta,
+                        }),
+                        createSyncNativeInstruction(wsolAta)
+                    );
+                    
+                    // Send transaction
+                    const signature = await sendTransaction(tx, connection);
+                    await connection.confirmTransaction(signature, 'confirmed');
+                    console.log('[CipherPayContext] Wrapped', delta / 1e9, 'SOL to wSOL:', signature);
+                }
+                
+                useDelegate = true;
+            }
+            
             // Prepare deposit parameters (SDK will call server APIs)
             const depositParams = {
                 amount: params.amount,
@@ -387,6 +461,9 @@ export const CipherPayProvider = ({ children }) => {
                 tokenSymbol: params.tokenSymbol || 'SOL',
                 decimals: params.decimals || 9,
                 memo: params.memo || 0,
+                sourceOwner,
+                sourceTokenAccount,
+                useDelegate,
             };
             
             console.log('[CipherPayContext] createDeposit: Calling service with params:', depositParams);
@@ -549,6 +626,15 @@ export const CipherPayProvider = ({ children }) => {
             if (user?.ownerCipherPayPubKey) {
                 console.log('[CipherPayContext] signIn: Starting event monitoring for user:', user.ownerCipherPayPubKey);
                 await cipherPayService.startEventMonitoring(user.ownerCipherPayPubKey);
+                
+                // Listen for deposit completed events to refresh account overview
+                cipherPayService.on('depositCompleted', async (eventData) => {
+                    console.log('[CipherPayContext] Deposit completed event received, refreshing account overview...', eventData);
+                    // Wait a bit for backend to process the deposit
+                    setTimeout(() => {
+                        updateServiceStatus();
+                    }, 1000);
+                });
             }
             
             // Refresh account overview from backend after authentication
@@ -644,23 +730,31 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Sync authentication state with connection state
-    // IMPORTANT: Only clear auth when disconnected, don't auto-set from stored tokens
+    // IMPORTANT: Only clear auth when explicitly disconnected, don't auto-set from stored tokens
     // This prevents auto-redirect to dashboard when user navigates back to login
+    // BUT: Don't clear auth just because wallet is disconnected - user might reconnect
     useEffect(() => {
         if (isInitialized) {
+            // Check if user explicitly disconnected (not just wallet disconnected)
+            // Only clear auth if user explicitly signed out, not just wallet disconnect
+            // This allows users to reconnect wallet without losing authentication
             const hasValidToken = authService.isAuthenticated();
+            const storedUser = localStorage.getItem('cipherpay_user');
             
-            // Only manage authentication state when disconnected
-            if (!isConnected) {
-                // Always clear authentication when not connected
-                console.log('[CipherPayContext] Clearing authentication - no active connection');
-                if (hasValidToken) {
-                    authService.clearAuth();
+            // If we have a valid token and user, keep authentication state
+            if (hasValidToken && storedUser) {
+                try {
+                    const user = JSON.parse(storedUser);
+                    if (!isAuthenticated) {
+                        console.log('[CipherPayContext] Restoring authentication state from stored token');
+                        setIsAuthenticated(true);
+                        setAuthUser(user);
+                    }
+                } catch (e) {
+                    console.warn('[CipherPayContext] Failed to parse stored user:', e);
                 }
-                setIsAuthenticated(false);
-                setAuthUser(null);
             }
-            // If connected but not authenticated, don't auto-authenticate from token
+            // Don't auto-authenticate from token on page load
             // User must explicitly call signIn() for authentication
             // This allows users to navigate to login page without being redirected
         }
