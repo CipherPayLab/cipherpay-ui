@@ -269,7 +269,7 @@ export const CipherPayProvider = ({ children }) => {
             setError(null);
             // Explicitly clear any persisted auth/session first to avoid immediate re-login loops
             try {
-                localStorage.removeItem('cipherpay_auth_token');
+                localStorage.removeItem('cipherpay_token');
                 sessionStorage.setItem('cipherpay_just_disconnected', '1');
             } catch (e) {
                 console.warn('[CipherPayContext] Unable to clear persisted auth token', e);

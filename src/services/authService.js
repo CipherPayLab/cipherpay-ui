@@ -419,7 +419,9 @@ class AuthService {
     let { pubKey, privKey } = identity.keypair ?? {};
     pubKey  = toBigIntFlexible(pubKey);
     privKey = toBigIntFlexible(privKey);
-    const recipientCipherPayPubKey = await poseidonHashForAuth([pubKey, privKey]);
+    // Use poseidonHash (not poseidonHashForAuth) to match note creation
+    // This ensures ownerKey matches ownerCipherPayPubKey in notes
+    const recipientCipherPayPubKey = await poseidonHash([pubKey, privKey]);
     return '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
   }
 
