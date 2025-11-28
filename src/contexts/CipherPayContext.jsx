@@ -170,8 +170,9 @@ export const CipherPayProvider = ({ children }) => {
             setBalance(status.balance);
         }
 
-        // Update notes from SDK
-        setSpendableNotes(cipherPayService.getSpendableNotes());
+        // Update notes from backend (database)
+        const spendableNotes = await cipherPayService.getSpendableNotes();
+        setSpendableNotes(spendableNotes);
         const notes = await cipherPayService.getAllNotes();
         setAllNotes(Array.isArray(notes) ? notes : []);
 
@@ -302,11 +303,20 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Transfer Management
-    const createTransfer = async (recipientPublicKey, amount) => {
+    const createTransfer = async (recipientPublicKey, amount, inputNote = null) => {
         try {
             setLoading(true);
             setError(null);
-            const transaction = await cipherPayService.createTransaction(recipientPublicKey, amount);
+            console.log('[CipherPayContext] createTransfer: Called with recipientPublicKey:', recipientPublicKey, 'amount:', amount.toString());
+            const transaction = await cipherPayService.createTransaction(recipientPublicKey, amount, inputNote);
+            console.log('[CipherPayContext] createTransfer: Transaction created:', transaction);
+            
+            // Refresh account overview after transfer
+            setTimeout(() => {
+                console.log('[CipherPayContext] createTransfer: Triggering account overview refresh after transfer');
+                updateServiceStatus();
+            }, 1000); // Wait a bit for backend to process the transfer
+            
             return transaction;
         } catch (err) {
             setError(err.message);
