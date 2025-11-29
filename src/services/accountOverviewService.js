@@ -81,8 +81,21 @@ export function decryptMessages(messages) {
   
   for (const msg of messages) {
     try {
+      console.log(`[accountOverviewService] Attempting to decrypt message ${msg.id}, kind: ${msg.kind}`);
+      console.log(`[accountOverviewService] Ciphertext type: ${typeof msg.ciphertext}, length: ${msg.ciphertext?.length}`);
+      console.log(`[accountOverviewService] Ciphertext preview: ${msg.ciphertext?.substring(0, 100)}...`);
+      
       // Decrypt the ciphertext
       const decrypted = decryptFromSenderForMe(msg.ciphertext);
+      
+      console.log(`[accountOverviewService] Decryption result:`, decrypted ? 'success' : 'failed (null)');
+      if (decrypted) {
+        console.log(`[accountOverviewService] Decrypted keys:`, Object.keys(decrypted));
+        console.log(`[accountOverviewService] Has note property:`, !!decrypted.note);
+        if (decrypted.note) {
+          console.log(`[accountOverviewService] Note keys:`, Object.keys(decrypted.note));
+        }
+      }
       
       if (decrypted && decrypted.note) {
         // Convert hex strings to BigInt if needed
@@ -108,14 +121,18 @@ export function decryptMessages(messages) {
           },
           memo: decrypted.note.memo,
         };
+        console.log(`[accountOverviewService] Successfully decrypted and parsed note from message ${msg.id}`);
         notes.push(note);
+      } else {
+        console.warn(`[accountOverviewService] Message ${msg.id} decryption returned null or missing note property`);
       }
     } catch (error) {
-      console.warn(`Failed to decrypt message ${msg.id}:`, error);
+      console.error(`[accountOverviewService] Failed to decrypt message ${msg.id}:`, error);
+      console.error(`[accountOverviewService] Error stack:`, error.stack);
       // Continue with other messages
     }
   }
-
+  
   return notes;
 }
 

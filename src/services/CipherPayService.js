@@ -294,6 +294,12 @@ class CipherPayService {
             // Validate required parameters
             if (!recipientPublicKey) throw new Error('Recipient public key is required');
             if (!amount || amount <= 0n) throw new Error('Amount must be greater than 0');
+            
+            // Minimum transfer amount: 0.001 SOL (1,000,000 atoms)
+            const MIN_TRANSFER_AMOUNT = 1_000_000n; // 0.001 SOL
+            if (amount < MIN_TRANSFER_AMOUNT) {
+                throw new Error(`Minimum transfer amount is 0.001 SOL. Requested: ${(Number(amount) / 1e9).toFixed(9)} SOL`);
+            }
 
             // Check if SDK transfer function is available
             if (!window.CipherPaySDK?.transfer) {
@@ -311,7 +317,11 @@ class CipherPayService {
             
             if (inputNote) {
                 // Use provided note - validate it has enough balance
-                if (BigInt(inputNote.amount) < amount) {
+                const inputNoteAmount = BigInt(inputNote.amount);
+                if (inputNoteAmount < MIN_TRANSFER_AMOUNT) {
+                    throw new Error(`Input note amount must be at least 0.001 SOL. Current: ${(Number(inputNoteAmount) / 1e9).toFixed(9)} SOL`);
+                }
+                if (inputNoteAmount < amount) {
                     throw new Error('Available shield balance insufficient');
                 }
                 selectedNotes = [inputNote];
@@ -322,14 +332,20 @@ class CipherPayService {
                     throw new Error('No spendable notes available. Please deposit funds first.');
                 }
 
+                // Filter out notes that are less than minimum transfer amount (0.001 SOL)
+                const validNotes = spendable.filter(n => BigInt(n.amount) >= MIN_TRANSFER_AMOUNT);
+                if (validNotes.length === 0) {
+                    throw new Error('No notes with sufficient amount (minimum 0.001 SOL) available for transfer.');
+                }
+
                 // VALIDATION: Check total available balance first
-                const totalAvailable = spendable.reduce((sum, n) => sum + BigInt(n.amount), 0n);
+                const totalAvailable = validNotes.reduce((sum, n) => sum + BigInt(n.amount), 0n);
                 if (totalAvailable < amount) {
                     throw new Error('Available shield balance insufficient');
                 }
 
                 // Strategy 1: Try to find a single note with amount >= transfer amount
-                const singleNote = spendable.find(n => BigInt(n.amount) >= amount);
+                const singleNote = validNotes.find(n => BigInt(n.amount) >= amount);
                 
                 if (singleNote) {
                     console.log('[CipherPayService] Found single note sufficient for transfer:', {
@@ -342,7 +358,7 @@ class CipherPayService {
                     console.log('[CipherPayService] No single note sufficient, selecting multiple notes...');
                     
                     // Sort notes by amount (biggest first)
-                    const sortedNotes = [...spendable].sort((a, b) => {
+                    const sortedNotes = [...validNotes].sort((a, b) => {
                         const amountA = BigInt(a.amount);
                         const amountB = BigInt(b.amount);
                         if (amountB > amountA) return 1;
@@ -476,41 +492,75 @@ class CipherPayService {
             let recipientAmount, changeAmount;
             
             if (transferAmount === inputAmount) {
-                // CASE 1: Transfer amount equals input amount - Randomly split for privacy
-                // This prevents observers from knowing which output is the recipient
-                // Minimum dust amount for each output (to prevent tiny notes)
-                const minDust = 1000n; // 0.000001 SOL minimum per output
-                const maxSplit = inputAmount - minDust;
+                // CASE 1: Transfer amount equals input amount - Full transfer
+                // Randomly split the full amount into two outputs, BOTH for recipient
+                // This enhances privacy - can't tell which output is the "real" amount
+                // Round to 3 decimal places for readability (0.001 SOL = 1,000,000)
+                const roundingPrecision = 1_000_000n; // 0.001 SOL (3 decimal places)
+                const minAmountPerOutput = 500_000n; // 0.0005 SOL - minimum per output
                 
-                if (maxSplit < minDust) {
-                    // Edge case: input amount is too small to split meaningfully
-                    // Split equally
-                    out1Amount = inputAmount / 2n;
-                    out2Amount = inputAmount - out1Amount;
-                } else {
-                    // Generate random split: out1Amount between minDust and maxSplit
-                    const range = maxSplit - minDust + 1n;
-                    const randomBytes = new Uint8Array(8);
-                    crypto.getRandomValues(randomBytes);
-                    // Convert random bytes to BigInt (0 to 2^64-1)
-                    let randomBigInt = 0n;
-                    for (let i = 0; i < 8; i++) {
-                        randomBigInt = (randomBigInt << 8n) | BigInt(randomBytes[i]);
-                    }
-                    // Scale to range
-                    out1Amount = minDust + (randomBigInt % range);
-                    out2Amount = inputAmount - out1Amount;
+                // inputAmount is already validated to be >= 0.001 SOL (MIN_TRANSFER_AMOUNT)
+                // So we can always split into two outputs of at least 0.0005 SOL each
+                
+                // Generate random split between 1% and 99% (rounded to 0.001 SOL)
+                const minPercent = 1n; // 1%
+                const maxPercent = 99n; // 99%
+                
+                // Generate random percentage between minPercent and maxPercent
+                const randomBytes = new Uint8Array(1);
+                crypto.getRandomValues(randomBytes);
+                const randomPercent = minPercent + (BigInt(randomBytes[0]) % (maxPercent - minPercent + 1n));
+                
+                // Calculate out1Amount as randomPercent of inputAmount, rounded to 0.001 SOL
+                const out1AmountUnrounded = (inputAmount * randomPercent) / 100n;
+                out1Amount = (out1AmountUnrounded / roundingPrecision) * roundingPrecision;
+                
+                // Ensure it's at least 0.0005 SOL and at most (inputAmount - 0.0005 SOL)
+                // This guarantees both outputs are at least 0.0005 SOL
+                const maxAmount = inputAmount - minAmountPerOutput;
+                if (out1Amount < minAmountPerOutput) out1Amount = minAmountPerOutput;
+                if (out1Amount > maxAmount) out1Amount = maxAmount;
+                
+                // out2Amount is the remainder
+                out2Amount = inputAmount - out1Amount;
+                
+                // Ensure out2Amount is also at least 0.0005 SOL (defensive check)
+                // If rounding caused out2Amount to be less than minAmountPerOutput, adjust
+                if (out2Amount < minAmountPerOutput) {
+                    // Adjust out1Amount down to ensure out2Amount is at least minAmountPerOutput
+                    out1Amount = inputAmount - minAmountPerOutput;
+                    out2Amount = minAmountPerOutput;
                 }
                 
-                // Randomly decide which output position gets the recipient
-                // This further enhances privacy - can't tell from position which is recipient
-                recipientGetsOut1 = crypto.getRandomValues(new Uint8Array(1))[0] % 2 === 0;
-                recipientAmount = recipientGetsOut1 ? out1Amount : out2Amount;
-                changeAmount = recipientGetsOut1 ? out2Amount : out1Amount;
+                // Final verification: both must be non-zero and at least 0.0005 SOL
+                if (out1Amount === 0n || out2Amount === 0n || out1Amount < minAmountPerOutput || out2Amount < minAmountPerOutput) {
+                    // Fallback: split equally (rounded to 0.001 SOL)
+                    const halfAmount = (inputAmount / 2n / roundingPrecision) * roundingPrecision;
+                    out1Amount = halfAmount;
+                    out2Amount = inputAmount - out1Amount;
+                    // Ensure both are at least minAmountPerOutput
+                    if (out1Amount < minAmountPerOutput) {
+                        out1Amount = minAmountPerOutput;
+                        out2Amount = inputAmount - out1Amount;
+                    }
+                    if (out2Amount < minAmountPerOutput) {
+                        out2Amount = minAmountPerOutput;
+                        out1Amount = inputAmount - out2Amount;
+                    }
+                }
                 
-                console.log('[CipherPayService] Full amount transfer - Randomly split for privacy:', {
+                // Both outputs go to recipient (no change for sender)
+                // Randomly decide which output position gets which amount for privacy
+                recipientGetsOut1 = crypto.getRandomValues(new Uint8Array(1))[0] % 2 === 0;
+                
+                // Both amounts go to recipient, so recipientAmount is the sum
+                recipientAmount = inputAmount; // Full amount goes to recipient
+                changeAmount = 0n; // No change for sender
+                
+                console.log('[CipherPayService] Full amount transfer - Randomly split (rounded to 0.001 SOL), both outputs for recipient:', {
                     inputAmount: inputAmount.toString(),
                     transferAmount: transferAmount.toString(),
+                    randomPercent: randomPercent.toString(),
                     out1Amount: out1Amount.toString(),
                     out2Amount: out2Amount.toString(),
                     recipientGetsOut1,
@@ -565,34 +615,10 @@ class CipherPayService {
                 return BigInt(val);
             };
             
-            // DEBUG: Log inputNoteToUse before conversion
-            console.log('[CipherPayService] inputNoteToUse (before conversion):', {
-                amount: inputNoteToUse.amount,
-                amountType: typeof inputNoteToUse.amount,
-                amountIsArray: Array.isArray(inputNoteToUse.amount),
-                tokenId: inputNoteToUse.tokenId,
-                tokenIdType: typeof inputNoteToUse.tokenId,
-                randomness: inputNoteToUse.randomness,
-                randomnessR: inputNoteToUse.randomness?.r,
-                randomnessRType: typeof inputNoteToUse.randomness?.r,
-                memo: inputNoteToUse.memo,
-                memoType: typeof inputNoteToUse.memo,
-            });
-            
             const convertedAmount = toBigInt(inputNoteToUse.amount);
             const convertedTokenId = toBigInt(inputNoteToUse.tokenId);
             const convertedRandomnessR = toBigInt(inputNoteToUse.randomness.r);
             const convertedMemo = inputNoteToUse.memo ? toBigInt(inputNoteToUse.memo) : 0n;
-            
-            // DEBUG: Log converted values
-            console.log('[CipherPayService] Converted values:', {
-                amount: convertedAmount.toString(),
-                amountType: typeof convertedAmount,
-                amountIsArray: Array.isArray(convertedAmount),
-                tokenId: convertedTokenId.toString(),
-                randomnessR: convertedRandomnessR.toString(),
-                memo: convertedMemo.toString(),
-            });
             
             const inputNoteObj = {
                 amount: convertedAmount,
@@ -605,31 +631,29 @@ class CipherPayService {
                 memo: convertedMemo,
             };
             
-            // DEBUG: Log final inputNote object
-            console.log('[CipherPayService] Final inputNote object:', {
-                amount: inputNoteObj.amount.toString(),
-                amountType: typeof inputNoteObj.amount,
-                amountIsArray: Array.isArray(inputNoteObj.amount),
-                tokenId: inputNoteObj.tokenId.toString(),
-                randomness: {
-                    r: inputNoteObj.randomness.r.toString(),
-                    rType: typeof inputNoteObj.randomness.r,
-                },
-                memo: inputNoteObj.memo.toString(),
-            });
+            // Determine recipient for each output
+            // For full transfer: both outputs go to recipient
+            // For partial transfer: out1 goes to recipient, out2 goes to sender (change)
+            const isFullTransfer = transferAmount === inputAmount;
+            const out1Recipient = isFullTransfer 
+                ? recipientCipherPayPubKey  // Full transfer: both to recipient
+                : (recipientGetsOut1 ? recipientCipherPayPubKey : BigInt(inputNoteToUse.ownerCipherPayPubKey));
+            const out2Recipient = isFullTransfer
+                ? recipientCipherPayPubKey  // Full transfer: both to recipient
+                : (recipientGetsOut1 ? BigInt(inputNoteToUse.ownerCipherPayPubKey) : recipientCipherPayPubKey);
             
             const transferParams = {
                 identity,
                 inputNote: inputNoteObj,
                 out1: {
                     amount: { atoms: out1Amount, decimals: 9 },
-                    recipientCipherPayPubKey: recipientGetsOut1 ? recipientCipherPayPubKey : BigInt(inputNoteToUse.ownerCipherPayPubKey),
+                    recipientCipherPayPubKey: out1Recipient,
                     token: tokenDescriptor,
                     memo: 0n,
                 },
                 out2: {
                     amount: { atoms: out2Amount, decimals: 9 },
-                    recipientCipherPayPubKey: recipientGetsOut1 ? BigInt(inputNoteToUse.ownerCipherPayPubKey) : recipientCipherPayPubKey,
+                    recipientCipherPayPubKey: out2Recipient,
                     token: tokenDescriptor,
                     memo: 0n,
                 },
@@ -638,9 +662,6 @@ class CipherPayService {
                 ownerWalletPubKey: identity.ownerWalletPubKey || BigInt(0),
                 ownerWalletPrivKey: identity.ownerWalletPrivKey || BigInt(0),
                 onOut1NoteReady: async (note) => {
-                    // Temporarily disabled for debugging - prevents transfer messages from being created
-                    console.log('[CipherPayService] Out1 note ready (message saving disabled for debugging)', note);
-                    /*
                     try {
                         console.log('[CipherPayService] Out1 note ready, encrypting and saving...', note);
                         const recipientEncPubKeyB64 = getLocalEncPublicKeyB64();
@@ -680,14 +701,18 @@ class CipherPayService {
                     } catch (error) {
                         console.warn('[CipherPayService] Failed to save encrypted out1 note message:', error);
                     }
-                    */
                 },
                 onOut2NoteReady: async (note) => {
-                    // Temporarily disabled for debugging - prevents transfer messages from being created
-                    console.log('[CipherPayService] Out2 note ready (change) (message saving disabled for debugging)', note);
-                    /*
+                    // Skip saving note if amount is 0 (should not happen, but defensive check)
+                    if (note.amount === 0n || note.amount === 0) {
+                        console.log('[CipherPayService] Out2 note has 0 amount, skipping save');
+                        return;
+                    }
+                    
                     try {
-                        console.log('[CipherPayService] Out2 note ready (change), encrypting and saving...', note);
+                        // For full transfer: out2 is for recipient (part of random split)
+                        // For partial transfer: out2 is change for sender
+                        console.log('[CipherPayService] Out2 note ready, encrypting and saving...', note);
                         const recipientEncPubKeyB64 = getLocalEncPublicKeyB64();
                         const noteData = {
                             note: {
@@ -725,20 +750,11 @@ class CipherPayService {
                     } catch (error) {
                         console.warn('[CipherPayService] Failed to save encrypted out2 note message:', error);
                     }
-                    */
                 },
             };
 
-            console.log('[CipherPayService] Calling SDK transfer with params:', {
-                inputNoteAmount: transferParams.inputNote.amount.toString(),
-                out1Amount: transferParams.out1.amount.atoms.toString(),
-                out2Amount: transferParams.out2.amount.atoms.toString(),
-            });
-
             // Call SDK transfer
             const result = await window.CipherPaySDK.transfer(transferParams);
-
-            console.log('[CipherPayService] Transfer completed:', result);
 
             return {
                 recipient: recipientPublicKey,
