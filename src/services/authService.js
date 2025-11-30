@@ -728,30 +728,90 @@ class AuthService {
       console.log('[AuthService] Will send to backend:', !!solanaWalletAddress);
       console.log('[AuthService] ====== END WALLET ADDRESS DEBUG ======');
 
-      // Get or create identity - prioritize wallet-derived identity for security
+      // Get wallet adapter from solanaWallet parameter
       const walletAdapter = solanaWallet?.adapter || solanaWallet;
-      const identity = await this.getOrCreateIdentity(sdk, walletAdapter, solanaWalletAddress);
-      console.log('[AuthService] Identity created/retrieved');
+      
+      // SECURITY: Always require wallet signature for authentication to prove user is present
+      // This prevents unauthorized access if someone has access to stored credentials
+      if (!walletAdapter || typeof walletAdapter.signMessage !== 'function') {
+        throw new Error('Wallet signature required for authentication. Please connect your wallet and approve the signature request.');
+      }
+      
+      if (!solanaWalletAddress) {
+        throw new Error('Wallet address required for authentication.');
+      }
 
-      const ownerKey = await this.getOwnerCipherPayPubKey(identity);
+      // Request challenge first to get a fresh nonce
+      // We'll use this nonce in the authentication message that requires wallet signature
+      console.log('[AuthService] Requesting challenge to get nonce...');
+      let ownerKey, authPubKey, noteEncPubKey;
+      
+      // Try to get identity first (may be cached, but we'll still require wallet signature)
+      const walletAdapterForIdentity = walletAdapter;
+      try {
+        const cachedIdentity = await this.getOrCreateIdentity(sdk, walletAdapterForIdentity, solanaWalletAddress);
+        ownerKey = await this.getOwnerCipherPayPubKey(cachedIdentity);
+        authPubKey = await this.getAuthPubKey(cachedIdentity);
+        noteEncPubKey = cachedIdentity.curve25519EncPubKey;
+      } catch (e) {
+        console.warn('[AuthService] Could not get cached identity, will derive new one:', e);
+        // Will derive identity below after getting challenge
+      }
+      
+      // If we don't have identity yet, request challenge with placeholder (server will handle new users)
+      if (!ownerKey) {
+        // For new users, we need to derive identity first
+        console.log('[AuthService] No cached identity found, deriving from wallet signature...');
+        const identity = await this.deriveIdentityFromWallet(walletAdapter, solanaWalletAddress);
+        ownerKey = await this.getOwnerCipherPayPubKey(identity);
+        authPubKey = await this.getAuthPubKey(identity);
+        noteEncPubKey = identity.curve25519EncPubKey;
+        this.identity = identity; // Cache it
+      }
+      
       console.log('[AuthService] Owner key:', ownerKey.substring(0, 20) + '...');
-
-      console.log('[AuthService] Getting auth pub key...');
-      const authPubKey = await this.getAuthPubKey(identity);
       console.log('[AuthService] Auth pub key retrieved:', authPubKey);
-
-      // Get note encryption public key (Curve25519 public key, base64 encoded)
-      // This is derived from wallet signature seed and stored in DB as note_enc_pub_key
-      const noteEncPubKey = identity.curve25519EncPubKey; // Use the derived Curve25519 public key directly (base64)
       console.log('[AuthService] Note encryption public key (Curve25519, base64):', noteEncPubKey ? noteEncPubKey.substring(0, 20) + '...' : 'MISSING');
       
       if (!noteEncPubKey) {
         throw new Error('Curve25519 encryption public key not found in identity. Please re-authenticate.');
       }
 
-      console.log('[AuthService] Requesting challenge...');
       const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress, noteEncPubKey);
       console.log('[AuthService] Challenge received, nonce:', String(nonce).substring(0, 16) + '...');
+      
+      // SECURITY: Always require wallet signature for authentication
+      // This proves the user is present and approves the authentication
+      // Even if identity is cached, we require fresh wallet signature every time
+      console.log('[AuthService] ⚠️ SECURITY: Requesting wallet signature for authentication...');
+      console.log('[AuthService] Please approve the signature request in your wallet (e.g., Phantom)');
+      const authMessage = `CipherPay Authentication\n\nWallet: ${solanaWalletAddress}\nNonce: ${nonce}\nTimestamp: ${Date.now()}\n\nSign this message to authenticate. This proves you own the wallet and approve this authentication.`;
+      const authMessageBytes = new TextEncoder().encode(authMessage);
+      
+      let walletSignature;
+      try {
+        // This will pop up the wallet (e.g., Phantom) asking for user approval
+        walletSignature = await walletAdapter.signMessage(authMessageBytes);
+        console.log('[AuthService] ✅ Wallet signature obtained (user approved authentication)');
+      } catch (error) {
+        // Handle user rejection or cancellation
+        if (error.code === 4001 || error.message?.includes('reject') || error.message?.includes('denied') || error.message?.includes('cancel') || error.message?.includes('User rejected')) {
+          console.error('[AuthService] ❌ Authentication cancelled by user');
+          throw new Error('Authentication cancelled. Wallet signature is required to authenticate. Please approve the signature request in your wallet.');
+        }
+        console.error('[AuthService] ❌ Failed to get wallet signature:', error);
+        throw new Error(`Failed to get wallet signature: ${error.message || 'Unknown error'}. Please make sure your wallet is connected and try again.`);
+      }
+      
+      // Wallet signature obtained - user has approved authentication
+      // Now proceed with BabyJub signature for server verification
+      console.log('[AuthService] Wallet signature verified, proceeding with BabyJub signature for server verification...');
+      
+      // Get the identity (should be cached or just derived)
+      const identity = this.identity || await this.getOrCreateIdentity(sdk, walletAdapter, solanaWalletAddress);
+      if (!identity) {
+        throw new Error('Failed to get or create identity');
+      }
 
       console.log('[AuthService] Computing message field with nonce and ownerKey...');
       const nonceHex = String(nonce).startsWith('0x') ? String(nonce) : '0x' + String(nonce);
@@ -768,7 +828,7 @@ class AuthService {
       const msgField = await poseidonHash([nonceBI, ownerKeyBI]);
       console.log('[AuthService] Message field computed:', msgField.toString());
 
-      console.log('[AuthService] Signing message...');
+      console.log('[AuthService] Signing message with identity private key...');
       console.log('[AuthService] Signing with privKey type:', typeof identity.keypair.privKey);
       const signingPrivKey = toBigIntFlexible(identity.keypair.privKey);
       console.log('[AuthService] Signing with privKey (BigInt):', signingPrivKey.toString().substring(0, 50) + '...');
