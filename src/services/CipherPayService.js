@@ -271,6 +271,7 @@ class CipherPayService {
         }
     }
 
+
     addNote(note) {
         if (this.sdk?.noteManager) {
             this.sdk.noteManager.addNote(note);
@@ -606,6 +607,30 @@ class CipherPayService {
 
             // Import encryption utilities
             const { getLocalEncPublicKeyB64, encryptForRecipient } = await import('../lib/e2ee');
+            
+            // Helper function to get recipient's Curve25519 encryption public key from DB
+            // Note: note_enc_pub_key in DB is already a Curve25519 public key (base64), used directly
+            const getRecipientNoteEncPubKey = async (ownerCipherPayPubKey) => {
+                try {
+                    const response = await fetch(`${serverUrl}/api/v1/users/note-enc-pub-key/${ownerCipherPayPubKey}`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                        },
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        return data.noteEncPubKey;
+                    } else {
+                        console.warn(`[CipherPayService] Failed to get note_enc_pub_key for ${ownerCipherPayPubKey}:`, response.status, response.statusText);
+                        return null;
+                    }
+                } catch (error) {
+                    console.error(`[CipherPayService] Error fetching note_enc_pub_key for ${ownerCipherPayPubKey}:`, error);
+                    return null;
+                }
+            };
 
             // Prepare transfer parameters with privacy-preserving random split
             // Ensure all values are BigInt (defensive conversion from hex strings or numbers)
@@ -664,7 +689,38 @@ class CipherPayService {
                 onOut1NoteReady: async (note) => {
                     try {
                         console.log('[CipherPayService] Out1 note ready, encrypting and saving...', note);
-                        const recipientEncPubKeyB64 = getLocalEncPublicKeyB64();
+                        console.log('[CipherPayService] Out1 note ownerCipherPayPubKey:', '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0'));
+                        console.log('[CipherPayService] Expected recipient key:', '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0'));
+                        
+                        // Verify that note.ownerCipherPayPubKey matches the expected recipient
+                        const noteOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        const expectedRecipientKey = '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
+                        
+                        if (noteOwnerKey !== expectedRecipientKey) {
+                            console.error('[CipherPayService] WARNING: Out1 note ownerCipherPayPubKey does not match expected recipient!', {
+                                noteOwnerKey,
+                                expectedRecipientKey,
+                            });
+                            // Continue anyway - might be a full transfer where both outputs go to recipient
+                        }
+                        
+                        // Get recipient's Curve25519 encryption public key from DB (SECURE approach)
+                        // This is a Curve25519 public key (base64), derived from wallet signature seed
+                        // The seed is never stored - only this public key is stored
+                        const recipientOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        console.log('[CipherPayService] Fetching note_enc_pub_key for recipient:', recipientOwnerKey);
+                        const recipientNoteEncPubKey = await getRecipientNoteEncPubKey(recipientOwnerKey);
+                        if (!recipientNoteEncPubKey) {
+                            const errorMsg = `Failed to get note_enc_pub_key for recipient ${recipientOwnerKey}. Recipient may not be registered yet.`;
+                            console.error('[CipherPayService]', errorMsg);
+                            throw new Error(errorMsg);
+                        }
+                        console.log('[CipherPayService] Successfully retrieved note_enc_pub_key for recipient');
+                        // Use Curve25519 public key directly (no derivation needed - it's already a Curve25519 key)
+                        // This public key was derived from wallet signature seed and stored in DB
+                        // Recipient will derive the matching keypair from their wallet signature seed when decrypting
+                        const recipientEncPubKeyB64 = recipientNoteEncPubKey; // Already base64 Curve25519 public key
+                        console.log('[CipherPayService] Out1 encryption - Using recipient Curve25519 public key directly from DB (first 20 chars):', recipientEncPubKeyB64.substring(0, 20) + '...');
                         const noteData = {
                             note: {
                                 amount: '0x' + note.amount.toString(16),
@@ -693,13 +749,21 @@ class CipherPayService {
                         });
                         if (messageResponse.ok) {
                             const messageResult = await messageResponse.json();
-                            console.log('[CipherPayService] Saved encrypted out1 note message:', messageResult);
+                            console.log('[CipherPayService] ✅ Successfully saved encrypted out1 note message:', messageResult);
+                            console.log('[CipherPayService] Out1 message saved with recipient_key:', recipientKey);
                         } else {
                             const errorText = await messageResponse.text();
-                            console.warn('[CipherPayService] Failed to save out1 note message:', errorText);
+                            console.error('[CipherPayService] ❌ Failed to save out1 note message:', messageResponse.status, errorText);
+                            console.error('[CipherPayService] Out1 message details:', {
+                                recipientKey,
+                                kind: 'note-transfer',
+                                ciphertextLength: ciphertextB64.length,
+                            });
                         }
                     } catch (error) {
-                        console.warn('[CipherPayService] Failed to save encrypted out1 note message:', error);
+                        console.error('[CipherPayService] ❌ Exception while saving encrypted out1 note message:', error);
+                        console.error('[CipherPayService] Error stack:', error.stack);
+                        // Don't throw - let the transfer continue even if message saving fails
                     }
                 },
                 onOut2NoteReady: async (note) => {
@@ -713,7 +777,25 @@ class CipherPayService {
                         // For full transfer: out2 is for recipient (part of random split)
                         // For partial transfer: out2 is change for sender
                         console.log('[CipherPayService] Out2 note ready, encrypting and saving...', note);
-                        const recipientEncPubKeyB64 = getLocalEncPublicKeyB64();
+                        // Determine the actual recipient of this specific output note
+                        // If it's a change note for the sender, use the sender's encryption public key
+                        // Otherwise, use the recipient's encryption public key (from DB)
+                        const isChangeNoteForSender = !isFullTransfer && (note.ownerCipherPayPubKey === BigInt(inputNoteToUse.ownerCipherPayPubKey));
+                        let encryptionTargetPubKey;
+                        if (isChangeNoteForSender) {
+                            // Sender's own encryption key (derived from their privKey)
+                            encryptionTargetPubKey = getLocalEncPublicKeyB64();
+                        } else {
+                            // Get recipient's Curve25519 encryption public key from DB (SECURE approach)
+                            const recipientOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                            const recipientNoteEncPubKey = await getRecipientNoteEncPubKey(recipientOwnerKey);
+                            if (!recipientNoteEncPubKey) {
+                                throw new Error(`Failed to get note_enc_pub_key for recipient ${recipientOwnerKey}`);
+                            }
+                            // Use Curve25519 public key directly (no derivation needed - it's already a Curve25519 key)
+                            encryptionTargetPubKey = recipientNoteEncPubKey;
+                        }
+                        console.log('[CipherPayService] Out2 encryption - Using public key (first 20 chars):', encryptionTargetPubKey.substring(0, 20) + '...');
                         const noteData = {
                             note: {
                                 amount: '0x' + note.amount.toString(16),
@@ -726,7 +808,7 @@ class CipherPayService {
                                 ...(note.memo ? { memo: '0x' + note.memo.toString(16) } : {}),
                             },
                         };
-                        const ciphertextB64 = encryptForRecipient(recipientEncPubKeyB64, noteData);
+                        const ciphertextB64 = encryptForRecipient(encryptionTargetPubKey, noteData);
                         const recipientKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
                         const messageResponse = await fetch(`${serverUrl}/api/v1/messages`, {
                             method: 'POST',

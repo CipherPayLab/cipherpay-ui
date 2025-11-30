@@ -294,25 +294,44 @@ class AuthService {
       console.log('[AuthService] Signature obtained, length:', signatureHex.length);
       
       // Derive keypair from signature using Poseidon hash for domain separation
-      // Use two different domain separators to generate independent keys
+      // Use different domain separators to generate independent keys
       const seed = BigInt('0x' + signatureHex);
+      const normalizedSeed = seed % BigInt('0x' + 'f'.repeat(64));
       
-      // Generate privKey: Hash(seed, 1)
-      const privKeySeed = await poseidonHashForAuth([seed % BigInt('0x' + 'f'.repeat(64)), 1n]);
+      // Generate privKey: Hash(seed, 1) - for identity/authentication
+      const privKeySeed = await poseidonHashForAuth([normalizedSeed, 1n]);
       const privKey = privKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001'); // BN254 field modulus
       
-      // Generate pubKey: Hash(seed, 2)
-      const pubKeySeed = await poseidonHashForAuth([seed % BigInt('0x' + 'f'.repeat(64)), 2n]);
+      // Generate pubKey: Hash(seed, 2) - for identity/authentication
+      const pubKeySeed = await poseidonHashForAuth([normalizedSeed, 2n]);
       const pubKey = pubKeySeed % BigInt('0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001');
       
+      // Derive Curve25519 encryption keypair from signature seed (for E2EE)
+      // Use the signature directly as seed for Curve25519 keypair
+      // This ensures the same wallet signature always produces the same Curve25519 keypair
+      const { deriveCurve25519KeypairFromSeed } = await import('../lib/e2ee');
+      const curve25519Keypair = deriveCurve25519KeypairFromSeed(normalizedSeed);
+      
       console.log('[AuthService] Derived deterministic identity with distinct keys');
+      console.log('[AuthService] Curve25519 encryption public key derived (will be saved to DB as note_enc_pub_key)');
       
       // Store the wallet address used for derivation (for validation on reload)
+      // Store the Curve25519 keypair so recipient can decrypt (it's deterministic from seed, so safe to store)
+      // The seed (wallet signature) is never stored - only the derived Curve25519 keypair
       const identity = { 
         keypair: { privKey, pubKey },
+        curve25519EncPubKey: curve25519Keypair.publicKeyB64, // Curve25519 public key (base64) - saved to DB as note_enc_pub_key
+        curve25519EncKeypair: curve25519Keypair, // Full Curve25519 keypair (public + secret) - stored locally for decryption
         derivedFromWallet: walletAddress,
         derivationTimestamp: Date.now()
       };
+      
+      // Also store the Curve25519 keypair in localStorage for quick access
+      try {
+        localStorage.setItem('cps.encKeypair.v1', JSON.stringify(curve25519Keypair));
+      } catch (e) {
+        console.warn('[AuthService] Failed to store Curve25519 keypair in localStorage:', e);
+      }
       
       return identity;
     } catch (error) {
@@ -332,8 +351,17 @@ class AuthService {
           // If wallet is provided, check if identity was derived from this wallet
           if (walletAddress && this.identity.derivedFromWallet) {
             if (this.identity.derivedFromWallet === walletAddress) {
-              console.log('[AuthService] Using existing deterministic identity for wallet:', walletAddress);
-              return this.identity;
+              // Check if identity has Curve25519 encryption keypair (required for new secure E2EE)
+              if (!this.identity.curve25519EncPubKey) {
+                console.warn('[AuthService] Existing identity missing Curve25519 encryption keypair, need to re-derive');
+                console.warn('[AuthService] This identity was created before the secure E2EE update');
+                // Clear the identity so it will be re-derived below
+                this.identity = null;
+                localStorage.removeItem('cipherpay_identity');
+              } else {
+                console.log('[AuthService] Using existing deterministic identity for wallet:', walletAddress);
+                return this.identity;
+              }
             } else {
               console.warn('[AuthService] Wallet changed, need to re-derive identity');
               console.warn('[AuthService] Previous wallet:', this.identity.derivedFromWallet);
@@ -342,13 +370,25 @@ class AuthService {
             }
           } else {
             // Legacy identity without wallet derivation
-            // If a wallet is now available, clear this and derive from wallet instead
-            if (wallet && walletAddress && typeof wallet.signMessage === 'function') {
+            // Check if it has Curve25519 encryption keypair
+            if (!this.identity.curve25519EncPubKey) {
+              console.warn('[AuthService] Legacy identity missing Curve25519 encryption keypair, need to re-derive');
+              // If wallet is available, clear and derive from wallet
+              if (wallet && walletAddress && typeof wallet.signMessage === 'function') {
+                console.warn('[AuthService] Wallet available, migrating to wallet-derived identity with Curve25519 keypair...');
+                this.clearIdentity();
+              } else {
+                // No wallet available, but identity is incomplete - clear it
+                console.warn('[AuthService] Legacy identity is incomplete and no wallet available, clearing...');
+                this.clearIdentity();
+              }
+            } else if (wallet && walletAddress && typeof wallet.signMessage === 'function') {
+              // Legacy identity has Curve25519 keypair, but wallet is available - migrate to wallet-derived
               console.warn('[AuthService] Legacy identity found, but wallet is available. Migrating to wallet-derived identity...');
               this.clearIdentity();
             } else {
-              // No wallet available, keep using legacy identity
-              console.warn('[AuthService] Using legacy identity (not wallet-derived)');
+              // No wallet available, keep using legacy identity (it has Curve25519 keypair)
+              console.warn('[AuthService] Using legacy identity (not wallet-derived, but has Curve25519 keypair)');
               return this.identity;
             }
           }
@@ -584,9 +624,10 @@ class AuthService {
     return { x, y };
   }
 
-  async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null) {
+  async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null, noteEncPubKey = null) {
     const payload = { ownerKey, authPubKey };
     console.log('[AuthService] requestChallenge: solanaWalletAddress parameter:', solanaWalletAddress);
+    console.log('[AuthService] requestChallenge: noteEncPubKey parameter:', noteEncPubKey ? noteEncPubKey.substring(0, 20) + '...' : null);
     
     // FALLBACK: If wallet address is not provided, try to get it from sessionStorage
     if (!solanaWalletAddress) {
@@ -604,7 +645,15 @@ class AuthService {
     } else {
       console.log('[AuthService] requestChallenge: solanaWalletAddress is falsy, not adding to payload');
     }
-    console.log('[AuthService] requestChallenge: Final payload:', { ...payload, authPubKey: '...' });
+    
+    if (noteEncPubKey) {
+      payload.noteEncPubKey = noteEncPubKey;
+      console.log('[AuthService] requestChallenge: Added noteEncPubKey to payload');
+    } else {
+      console.log('[AuthService] requestChallenge: noteEncPubKey is falsy, not adding to payload');
+    }
+    
+    console.log('[AuthService] requestChallenge: Final payload:', { ...payload, authPubKey: '...', noteEncPubKey: noteEncPubKey ? '...' : null });
     const res = await axios.post(`${SERVER_URL}/auth/challenge`, payload);
     return res.data;
   }
@@ -691,8 +740,17 @@ class AuthService {
       const authPubKey = await this.getAuthPubKey(identity);
       console.log('[AuthService] Auth pub key retrieved:', authPubKey);
 
+      // Get note encryption public key (Curve25519 public key, base64 encoded)
+      // This is derived from wallet signature seed and stored in DB as note_enc_pub_key
+      const noteEncPubKey = identity.curve25519EncPubKey; // Use the derived Curve25519 public key directly (base64)
+      console.log('[AuthService] Note encryption public key (Curve25519, base64):', noteEncPubKey ? noteEncPubKey.substring(0, 20) + '...' : 'MISSING');
+      
+      if (!noteEncPubKey) {
+        throw new Error('Curve25519 encryption public key not found in identity. Please re-authenticate.');
+      }
+
       console.log('[AuthService] Requesting challenge...');
-      const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress);
+      const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress, noteEncPubKey);
       console.log('[AuthService] Challenge received, nonce:', String(nonce).substring(0, 16) + '...');
 
       console.log('[AuthService] Computing message field with nonce and ownerKey...');
