@@ -189,8 +189,45 @@ class CipherPayService {
     }
 
     // Note Management
-    getSpendableNotes() {
-        return this.sdk?.getSpendableNotes() || [];
+    // ALWAYS get notes from backend (database), never from SDK
+    async getSpendableNotes() {
+        try {
+            // Fetch messages from backend DB, decrypt them, and get account overview
+            const overview = await this.getAccountOverviewFromBackend({ checkOnChain: false });
+            // Filter out spent notes and return in the format expected by transfer
+            const spendable = (overview.notes || []).filter(n => !n.isSpent);
+            // Convert to the format expected by createTransaction
+            // Backend returns amounts as hex strings, convert to BigInt
+            return spendable.map(n => ({
+                amount: typeof n.amount === 'string' && n.amount.startsWith('0x') 
+                    ? BigInt(n.amount) 
+                    : BigInt(n.amount),
+                tokenId: typeof n.note.tokenId === 'string' && n.note.tokenId.startsWith('0x')
+                    ? BigInt(n.note.tokenId)
+                    : BigInt(n.note.tokenId),
+                ownerCipherPayPubKey: typeof n.note.ownerCipherPayPubKey === 'string' && n.note.ownerCipherPayPubKey.startsWith('0x')
+                    ? BigInt(n.note.ownerCipherPayPubKey)
+                    : BigInt(n.note.ownerCipherPayPubKey),
+                randomness: {
+                    r: typeof n.note.randomness.r === 'string' && n.note.randomness.r.startsWith('0x')
+                        ? BigInt(n.note.randomness.r)
+                        : BigInt(n.note.randomness.r),
+                    s: n.note.randomness.s 
+                        ? (typeof n.note.randomness.s === 'string' && n.note.randomness.s.startsWith('0x')
+                            ? BigInt(n.note.randomness.s)
+                            : BigInt(n.note.randomness.s))
+                        : undefined,
+                },
+                memo: n.note.memo 
+                    ? (typeof n.note.memo === 'string' && n.note.memo.startsWith('0x')
+                        ? BigInt(n.note.memo)
+                        : BigInt(n.note.memo))
+                    : 0n,
+            }));
+        } catch (error) {
+            console.error('[CipherPayService] Failed to get spendable notes from backend:', error);
+            return [];
+        }
     }
 
     async getAllNotes() {
@@ -234,46 +271,740 @@ class CipherPayService {
         }
     }
 
+
     addNote(note) {
         if (this.sdk?.noteManager) {
             this.sdk.noteManager.addNote(note);
         }
     }
 
-    // Transaction Management
-    async createTransaction(recipientPublicKey, amount) {
+    // Transaction Management - Transfer
+    // Note Selection Strategy:
+    // 1. Try to find a single note with amount >= transfer amount
+    // 2. If not found, select multiple notes (biggest to smallest) and transfer one by one
+    async createTransaction(recipientPublicKey, amount, inputNote = null) {
         if (!this.isInitialized) await this.initialize();
 
         try {
-            // Use the SDK's transfer method
-            const transferRequest = {
-                amount: BigInt(amount),
-                recipientAddress: recipientPublicKey,
-                stealthAddress: true,
-                complianceCheck: true,
-                metadata: {
+            console.log('[CipherPayService] createTransaction called with params:', {
+                recipientPublicKey,
+                amount: amount.toString(),
+                inputNote: inputNote ? 'provided' : 'not provided'
+            });
+
+            // Validate required parameters
+            if (!recipientPublicKey) throw new Error('Recipient public key is required');
+            if (!amount || amount <= 0n) throw new Error('Amount must be greater than 0');
+            
+            // Minimum transfer amount: 0.001 SOL (1,000,000 atoms)
+            const MIN_TRANSFER_AMOUNT = 1_000_000n; // 0.001 SOL
+            if (amount < MIN_TRANSFER_AMOUNT) {
+                throw new Error(`Minimum transfer amount is 0.001 SOL. Requested: ${(Number(amount) / 1e9).toFixed(9)} SOL`);
+            }
+
+            // Check if SDK transfer function is available
+            if (!window.CipherPaySDK?.transfer) {
+                throw new Error('SDK transfer function not available. Ensure the SDK bundle is loaded.');
+            }
+
+            // Get identity from stored keys
+            const identity = await this.getIdentity();
+            if (!identity) {
+                throw new Error('Identity not found. Please authenticate first.');
+            }
+
+            // Validate: Prevent transfers to self
+            // Compute sender's ownerCipherPayPubKey from identity wallet keys
+            const ownerWalletPubKey = identity.ownerWalletPubKey || BigInt(0);
+            const ownerWalletPrivKey = identity.ownerWalletPrivKey || BigInt(0);
+            
+            // Derive sender's ownerCipherPayPubKey using poseidonHash (same as SDK does)
+            const { poseidonHash } = window.CipherPaySDK || {};
+            if (!poseidonHash) {
+                throw new Error('SDK poseidonHash not available');
+            }
+            const senderOwnerCipherPayPubKey = await poseidonHash([ownerWalletPubKey, ownerWalletPrivKey]);
+            const senderOwnerKeyHex = '0x' + senderOwnerCipherPayPubKey.toString(16).padStart(64, '0').toLowerCase();
+            
+            // Normalize recipient public key for comparison
+            let normalizedRecipientKey;
+            if (typeof recipientPublicKey === 'string') {
+                normalizedRecipientKey = recipientPublicKey.startsWith('0x')
+                    ? recipientPublicKey.toLowerCase()
+                    : '0x' + recipientPublicKey.toLowerCase();
+            } else {
+                normalizedRecipientKey = '0x' + recipientPublicKey.toString(16).padStart(64, '0').toLowerCase();
+            }
+            
+            if (normalizedRecipientKey === senderOwnerKeyHex) {
+                alert('Cannot transfer to yourself!');
+                throw new Error('Cannot transfer to yourself!');
+            }
+
+            // Validate: Recipient must exist in database and have valid keys
+            const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+            const authToken = localStorage.getItem('cipherpay_token');
+            
+            // Helper function to validate owner_cipherpay_pub_key format
+            const validateOwnerCipherPayPubKey = (key) => {
+                if (!key || typeof key !== 'string') {
+                    return { valid: false, error: 'owner_cipherpay_pub_key must be a string' };
+                }
+                
+                // Must start with 0x
+                if (!key.startsWith('0x')) {
+                    return { valid: false, error: 'owner_cipherpay_pub_key must start with 0x' };
+                }
+                
+                // Must be exactly 66 characters (0x + 64 hex digits)
+                if (key.length !== 66) {
+                    return { valid: false, error: `owner_cipherpay_pub_key must be 66 characters (got ${key.length})` };
+                }
+                
+                // Must be valid hex (only 0-9, a-f, A-F after 0x)
+                const hexPart = key.substring(2);
+                if (!/^[0-9a-fA-F]+$/.test(hexPart)) {
+                    return { valid: false, error: 'owner_cipherpay_pub_key contains invalid hex characters' };
+                }
+                
+                // Must be a valid BigInt
+                try {
+                    const keyBigInt = BigInt(key);
+                    if (keyBigInt === 0n) {
+                        return { valid: false, error: 'owner_cipherpay_pub_key cannot be zero' };
+                    }
+                } catch (e) {
+                    return { valid: false, error: `owner_cipherpay_pub_key is not a valid BigInt: ${e.message}` };
+                }
+                
+                return { valid: true };
+            };
+            
+            // Helper function to validate note_enc_pub_key format (base64 Curve25519 public key)
+            const validateNoteEncPubKey = (key) => {
+                if (!key || typeof key !== 'string') {
+                    return { valid: false, error: 'note_enc_pub_key must be a string' };
+                }
+                
+                // Base64 encoded Curve25519 public key should be 44 characters (32 bytes = 44 base64 chars)
+                // With padding it could be 44-48 characters
+                if (key.length < 44 || key.length > 48) {
+                    return { valid: false, error: `note_enc_pub_key must be 44-48 characters (got ${key.length})` };
+                }
+                
+                // Must be valid base64
+                try {
+                    // Try to decode base64
+                    const decoded = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
+                    const bytes = new Uint8Array(decoded.length);
+                    for (let i = 0; i < decoded.length; i++) {
+                        bytes[i] = decoded.charCodeAt(i);
+                    }
+                    
+                    // Curve25519 public key must be exactly 32 bytes
+                    if (bytes.length !== 32) {
+                        return { valid: false, error: `note_enc_pub_key must decode to exactly 32 bytes (got ${bytes.length})` };
+                    }
+                } catch (e) {
+                    return { valid: false, error: `note_enc_pub_key is not valid base64: ${e.message}` };
+                }
+                
+                return { valid: true };
+            };
+            
+            // Validate recipient's owner_cipherpay_pub_key format
+            const ownerKeyValidation = validateOwnerCipherPayPubKey(normalizedRecipientKey);
+            if (!ownerKeyValidation.valid) {
+                console.error('[CipherPayService] Invalid owner_cipherpay_pub_key format:', ownerKeyValidation.error);
+                alert('Invalid recipient!');
+                throw new Error(`Invalid recipient! ${ownerKeyValidation.error}`);
+            }
+            
+            try {
+                const response = await fetch(`${serverUrl}/api/v1/users/note-enc-pub-key/${normalizedRecipientKey}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                    },
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        alert('Invalid recipient!');
+                        throw new Error('Invalid recipient! Recipient not found or missing required keys.');
+                    } else {
+                        const errorText = await response.text();
+                        console.error('[CipherPayService] Failed to validate recipient:', response.status, errorText);
+                        alert('Invalid recipient!');
+                        throw new Error(`Failed to validate recipient: ${response.status}`);
+                    }
+                }
+                
+                const data = await response.json();
+                if (!data.noteEncPubKey) {
+                    alert('Invalid recipient!');
+                    throw new Error('Invalid recipient! Recipient missing note encryption public key.');
+                }
+                
+                // Validate note_enc_pub_key format
+                const noteEncKeyValidation = validateNoteEncPubKey(data.noteEncPubKey);
+                if (!noteEncKeyValidation.valid) {
+                    console.error('[CipherPayService] Invalid note_enc_pub_key format:', noteEncKeyValidation.error);
+                    alert('Invalid recipient!');
+                    throw new Error(`Invalid recipient! Corrupted note_enc_pub_key: ${noteEncKeyValidation.error}`);
+                }
+                
+                console.log('[CipherPayService] Recipient validated successfully with valid keys');
+            } catch (error) {
+                // If it's already our custom error, re-throw it
+                if (error.message.includes('Invalid recipient') || error.message.includes('Cannot transfer')) {
+                    throw error;
+                }
+                // Otherwise, it's a network/API error
+                console.error('[CipherPayService] Error validating recipient:', error);
+                alert('Invalid recipient!');
+                throw new Error('Invalid recipient! Failed to verify recipient in database.');
+            }
+
+            // NOTE SELECTION STRATEGY
+            let selectedNotes = [];
+            
+            if (inputNote) {
+                // Use provided note - validate it has enough balance
+                const inputNoteAmount = BigInt(inputNote.amount);
+                if (inputNoteAmount < MIN_TRANSFER_AMOUNT) {
+                    throw new Error(`Input note amount must be at least 0.001 SOL. Current: ${(Number(inputNoteAmount) / 1e9).toFixed(9)} SOL`);
+                }
+                if (inputNoteAmount < amount) {
+                    throw new Error('Available shield balance insufficient');
+                }
+                selectedNotes = [inputNote];
+            } else {
+                // Get spendable notes from backend database (queries messages table and checks nullifiers)
+                const spendable = await this.getSpendableNotes();
+                if (spendable.length === 0) {
+                    throw new Error('No spendable notes available. Please deposit funds first.');
+                }
+
+                // Filter out notes that are less than minimum transfer amount (0.001 SOL)
+                const validNotes = spendable.filter(n => BigInt(n.amount) >= MIN_TRANSFER_AMOUNT);
+                if (validNotes.length === 0) {
+                    throw new Error('No notes with sufficient amount (minimum 0.001 SOL) available for transfer.');
+                }
+
+                // VALIDATION: Check total available balance first
+                const totalAvailable = validNotes.reduce((sum, n) => sum + BigInt(n.amount), 0n);
+                if (totalAvailable < amount) {
+                    throw new Error('Available shield balance insufficient');
+                }
+
+                // Strategy 1: Try to find a single note with amount >= transfer amount
+                const singleNote = validNotes.find(n => BigInt(n.amount) >= amount);
+                
+                if (singleNote) {
+                    console.log('[CipherPayService] Found single note sufficient for transfer:', {
+                        noteAmount: singleNote.amount.toString(),
+                        transferAmount: amount.toString()
+                    });
+                    selectedNotes = [singleNote];
+                } else {
+                    // Strategy 2: Select multiple notes from biggest to smallest
+                    console.log('[CipherPayService] No single note sufficient, selecting multiple notes...');
+                    
+                    // Sort notes by amount (biggest first)
+                    const sortedNotes = [...validNotes].sort((a, b) => {
+                        const amountA = BigInt(a.amount);
+                        const amountB = BigInt(b.amount);
+                        if (amountB > amountA) return 1;
+                        if (amountB < amountA) return -1;
+                        return 0;
+                    });
+                    
+                    // Select notes until we have enough
+                    let totalSelected = 0n;
+                    for (const note of sortedNotes) {
+                        selectedNotes.push(note);
+                        totalSelected += BigInt(note.amount);
+                        if (totalSelected >= amount) {
+                            break;
+                        }
+                    }
+                    
+                    // Double-check if we have enough (should not happen due to earlier validation, but safety check)
+                    if (totalSelected < amount) {
+                        throw new Error('Available shield balance insufficient');
+                    }
+                    
+                    console.log('[CipherPayService] Selected multiple notes:', {
+                        count: selectedNotes.length,
+                        totalAmount: totalSelected.toString(),
+                        transferAmount: amount.toString(),
+                        notes: selectedNotes.map(n => ({ amount: n.amount.toString() }))
+                    });
+                }
+            }
+
+            // If multiple notes selected, execute transfers one by one
+            if (selectedNotes.length > 1) {
+                console.log('[CipherPayService] Executing', selectedNotes.length, 'transfers sequentially...');
+                const results = [];
+                let remainingAmount = amount;
+                
+                for (let i = 0; i < selectedNotes.length; i++) {
+                    const note = selectedNotes[i];
+                    const noteAmount = BigInt(note.amount);
+                    
+                    // Calculate transfer amount for this note
+                    // For each note, transfer the full note amount to recipient
+                    // The last note will have change if needed
+                    // But we need to track how much we still need to send
+                    const transferAmountForThisNote = remainingAmount <= noteAmount 
+                        ? remainingAmount  // Last note or enough: transfer remaining amount
+                        : noteAmount;      // Not enough yet: transfer full note amount
+                    
+                    console.log(`[CipherPayService] Transfer ${i + 1}/${selectedNotes.length}:`, {
+                        noteAmount: noteAmount.toString(),
+                        transferAmount: transferAmountForThisNote.toString(),
+                        remainingAmount: remainingAmount.toString(),
+                        willHaveChange: transferAmountForThisNote < noteAmount
+                    });
+                    
+                    // Execute transfer for this note
+                    const result = await this.executeSingleTransfer(
+                        identity,
+                        recipientPublicKey,
+                        transferAmountForThisNote,
+                        note
+                    );
+                    
+                    results.push(result);
+                    remainingAmount -= transferAmountForThisNote;
+                    
+                    // If we've transferred enough, stop
+                    if (remainingAmount <= 0n) {
+                        break;
+                    }
+                }
+                
+                // Return aggregated result
+                return {
+                    recipient: recipientPublicKey,
+                    amount: amount,
                     timestamp: Date.now(),
-                    source: 'cipherpay-ui'
+                    id: results[results.length - 1]?.txHash || results[0]?.txHash,
+                    txHash: results[results.length - 1]?.txHash || results[0]?.txHash,
+                    transfers: results,
+                    totalTransfers: results.length,
+                };
+            } else {
+                // Single note transfer
+                const inputNoteToUse = selectedNotes[0];
+                return await this.executeSingleTransfer(
+                    identity,
+                    recipientPublicKey,
+                    amount,
+                    inputNoteToUse
+                );
+            }
+        } catch (error) {
+            console.error('[CipherPayService] Failed to create transaction:', error);
+            throw error;
+        }
+    }
+
+    // Execute a single transfer with a specific note
+    async executeSingleTransfer(identity, recipientPublicKey, amount, inputNoteToUse) {
+        try {
+            // Validate input note structure
+            if (!inputNoteToUse.amount || !inputNoteToUse.tokenId || !inputNoteToUse.ownerCipherPayPubKey || !inputNoteToUse.randomness) {
+                throw new Error('Invalid input note structure');
+            }
+
+            // Parse recipient public key (should be ownerCipherPayPubKey as hex string or bigint)
+            let recipientCipherPayPubKey;
+            if (typeof recipientPublicKey === 'string') {
+                recipientCipherPayPubKey = recipientPublicKey.startsWith('0x')
+                    ? BigInt(recipientPublicKey)
+                    : BigInt('0x' + recipientPublicKey);
+            } else {
+                recipientCipherPayPubKey = BigInt(recipientPublicKey);
+            }
+
+            // Validate sufficient balance
+            if (inputNoteToUse.amount < amount) {
+                throw new Error(`Insufficient balance in selected note. Note amount: ${inputNoteToUse.amount}, requested: ${amount}`);
+            }
+
+            // PRIVACY-PRESERVING TRANSFER DESIGN:
+            // - If transfer amount == input note amount: Randomly split into two outputs (privacy-preserving)
+            // - If transfer amount < input note amount: Output1 = transfer (recipient), Output2 = remainder (sender change)
+            const inputAmount = BigInt(inputNoteToUse.amount);
+            const transferAmount = amount;
+            
+            let out1Amount, out2Amount;
+            let recipientGetsOut1;
+            let recipientAmount, changeAmount;
+            
+            if (transferAmount === inputAmount) {
+                // CASE 1: Transfer amount equals input amount - Full transfer
+                // Randomly split the full amount into two outputs, BOTH for recipient
+                // This enhances privacy - can't tell which output is the "real" amount
+                // Round to 3 decimal places for readability (0.001 SOL = 1,000,000)
+                const roundingPrecision = 1_000_000n; // 0.001 SOL (3 decimal places)
+                const minAmountPerOutput = 500_000n; // 0.0005 SOL - minimum per output
+                
+                // inputAmount is already validated to be >= 0.001 SOL (MIN_TRANSFER_AMOUNT)
+                // So we can always split into two outputs of at least 0.0005 SOL each
+                
+                // Generate random split between 1% and 99% (rounded to 0.001 SOL)
+                const minPercent = 1n; // 1%
+                const maxPercent = 99n; // 99%
+                
+                // Generate random percentage between minPercent and maxPercent
+                const randomBytes = new Uint8Array(1);
+                crypto.getRandomValues(randomBytes);
+                const randomPercent = minPercent + (BigInt(randomBytes[0]) % (maxPercent - minPercent + 1n));
+                
+                // Calculate out1Amount as randomPercent of inputAmount, rounded to 0.001 SOL
+                const out1AmountUnrounded = (inputAmount * randomPercent) / 100n;
+                out1Amount = (out1AmountUnrounded / roundingPrecision) * roundingPrecision;
+                
+                // Ensure it's at least 0.0005 SOL and at most (inputAmount - 0.0005 SOL)
+                // This guarantees both outputs are at least 0.0005 SOL
+                const maxAmount = inputAmount - minAmountPerOutput;
+                if (out1Amount < minAmountPerOutput) out1Amount = minAmountPerOutput;
+                if (out1Amount > maxAmount) out1Amount = maxAmount;
+                
+                // out2Amount is the remainder
+                out2Amount = inputAmount - out1Amount;
+                
+                // Ensure out2Amount is also at least 0.0005 SOL (defensive check)
+                // If rounding caused out2Amount to be less than minAmountPerOutput, adjust
+                if (out2Amount < minAmountPerOutput) {
+                    // Adjust out1Amount down to ensure out2Amount is at least minAmountPerOutput
+                    out1Amount = inputAmount - minAmountPerOutput;
+                    out2Amount = minAmountPerOutput;
+                }
+                
+                // Final verification: both must be non-zero and at least 0.0005 SOL
+                if (out1Amount === 0n || out2Amount === 0n || out1Amount < minAmountPerOutput || out2Amount < minAmountPerOutput) {
+                    // Fallback: split equally (rounded to 0.001 SOL)
+                    const halfAmount = (inputAmount / 2n / roundingPrecision) * roundingPrecision;
+                    out1Amount = halfAmount;
+                    out2Amount = inputAmount - out1Amount;
+                    // Ensure both are at least minAmountPerOutput
+                    if (out1Amount < minAmountPerOutput) {
+                        out1Amount = minAmountPerOutput;
+                        out2Amount = inputAmount - out1Amount;
+                    }
+                    if (out2Amount < minAmountPerOutput) {
+                        out2Amount = minAmountPerOutput;
+                        out1Amount = inputAmount - out2Amount;
+                    }
+                }
+                
+                // Both outputs go to recipient (no change for sender)
+                // Randomly decide which output position gets which amount for privacy
+                recipientGetsOut1 = crypto.getRandomValues(new Uint8Array(1))[0] % 2 === 0;
+                
+                // Both amounts go to recipient, so recipientAmount is the sum
+                recipientAmount = inputAmount; // Full amount goes to recipient
+                changeAmount = 0n; // No change for sender
+                
+                console.log('[CipherPayService] Full amount transfer - Randomly split (rounded to 0.001 SOL), both outputs for recipient:', {
+                    inputAmount: inputAmount.toString(),
+                    transferAmount: transferAmount.toString(),
+                    randomPercent: randomPercent.toString(),
+                    out1Amount: out1Amount.toString(),
+                    out2Amount: out2Amount.toString(),
+                    recipientGetsOut1,
+                    recipientAmount: recipientAmount.toString(),
+                    changeAmount: changeAmount.toString(),
+                });
+            } else {
+                // CASE 2: Transfer amount < input amount - Direct split (no privacy needed)
+                // Output1: recipient gets exact transfer amount
+                // Output2: sender gets remaining balance (change)
+                out1Amount = transferAmount;
+                out2Amount = inputAmount - transferAmount;
+                recipientGetsOut1 = true; // Recipient always gets out1 in this case
+                recipientAmount = out1Amount;
+                changeAmount = out2Amount;
+                
+                console.log('[CipherPayService] Partial amount transfer - Direct split:', {
+                    inputAmount: inputAmount.toString(),
+                    transferAmount: transferAmount.toString(),
+                    out1Amount: out1Amount.toString(),
+                    out2Amount: out2Amount.toString(),
+                    recipientGetsOut1: true,
+                    recipientAmount: recipientAmount.toString(),
+                    changeAmount: changeAmount.toString(),
+                });
+            }
+
+            // Get auth token for server API calls
+            const authToken = localStorage.getItem('cipherpay_token');
+            const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+
+            // Determine token descriptor from input note (assume same token for outputs)
+            // For now, assume wSOL (can be enhanced to support other tokens)
+            const tokenDescriptor = {
+                chain: 'solana',
+                symbol: 'SOL',
+                decimals: 9,
+                solana: {
+                    mint: 'So11111111111111111111111111111111111111112', // wSOL
+                    decimals: 9,
                 }
             };
 
-            const result = await this.sdk.transfer(transferRequest);
+            // Import encryption utilities
+            const { getLocalEncPublicKeyB64, encryptForRecipient } = await import('../lib/e2ee');
+            
+            // Helper function to get recipient's Curve25519 encryption public key from DB
+            // Note: note_enc_pub_key in DB is already a Curve25519 public key (base64), used directly
+            const getRecipientNoteEncPubKey = async (ownerCipherPayPubKey) => {
+                try {
+                    const response = await fetch(`${serverUrl}/api/v1/users/note-enc-pub-key/${ownerCipherPayPubKey}`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                        },
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        return data.noteEncPubKey;
+                    } else {
+                        console.warn(`[CipherPayService] Failed to get note_enc_pub_key for ${ownerCipherPayPubKey}:`, response.status, response.statusText);
+                        return null;
+                    }
+                } catch (error) {
+                    console.error(`[CipherPayService] Error fetching note_enc_pub_key for ${ownerCipherPayPubKey}:`, error);
+                    return null;
+                }
+            };
 
-            if (!result.success) {
-                throw new Error(result.error || 'Transfer failed');
-            }
+            // Prepare transfer parameters with privacy-preserving random split
+            // Ensure all values are BigInt (defensive conversion from hex strings or numbers)
+            const toBigInt = (val) => {
+                if (typeof val === 'bigint') return val;
+                if (typeof val === 'string' && val.startsWith('0x')) return BigInt(val);
+                return BigInt(val);
+            };
+            
+            const convertedAmount = toBigInt(inputNoteToUse.amount);
+            const convertedTokenId = toBigInt(inputNoteToUse.tokenId);
+            const convertedRandomnessR = toBigInt(inputNoteToUse.randomness.r);
+            const convertedMemo = inputNoteToUse.memo ? toBigInt(inputNoteToUse.memo) : 0n;
+            
+            const inputNoteObj = {
+                amount: convertedAmount,
+                tokenId: convertedTokenId,
+                ownerCipherPayPubKey: toBigInt(inputNoteToUse.ownerCipherPayPubKey),
+                randomness: {
+                    r: convertedRandomnessR,
+                    s: inputNoteToUse.randomness.s ? toBigInt(inputNoteToUse.randomness.s) : undefined,
+                },
+                memo: convertedMemo,
+            };
+            
+            // Determine recipient for each output
+            // For full transfer: both outputs go to recipient
+            // For partial transfer: out1 goes to recipient, out2 goes to sender (change)
+            const isFullTransfer = transferAmount === inputAmount;
+            const out1Recipient = isFullTransfer 
+                ? recipientCipherPayPubKey  // Full transfer: both to recipient
+                : (recipientGetsOut1 ? recipientCipherPayPubKey : BigInt(inputNoteToUse.ownerCipherPayPubKey));
+            const out2Recipient = isFullTransfer
+                ? recipientCipherPayPubKey  // Full transfer: both to recipient
+                : (recipientGetsOut1 ? BigInt(inputNoteToUse.ownerCipherPayPubKey) : recipientCipherPayPubKey);
+            
+            const transferParams = {
+                identity,
+                inputNote: inputNoteObj,
+                out1: {
+                    amount: { atoms: out1Amount, decimals: 9 },
+                    recipientCipherPayPubKey: out1Recipient,
+                    token: tokenDescriptor,
+                    memo: 0n,
+                },
+                out2: {
+                    amount: { atoms: out2Amount, decimals: 9 },
+                    recipientCipherPayPubKey: out2Recipient,
+                    token: tokenDescriptor,
+                    memo: 0n,
+                },
+                serverUrl,
+                authToken,
+                ownerWalletPubKey: identity.ownerWalletPubKey || BigInt(0),
+                ownerWalletPrivKey: identity.ownerWalletPrivKey || BigInt(0),
+                onOut1NoteReady: async (note) => {
+                    try {
+                        console.log('[CipherPayService] Out1 note ready, encrypting and saving...', note);
+                        console.log('[CipherPayService] Out1 note ownerCipherPayPubKey:', '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0'));
+                        console.log('[CipherPayService] Expected recipient key:', '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0'));
+                        
+                        // Verify that note.ownerCipherPayPubKey matches the expected recipient
+                        const noteOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        const expectedRecipientKey = '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
+                        
+                        if (noteOwnerKey !== expectedRecipientKey) {
+                            console.error('[CipherPayService] WARNING: Out1 note ownerCipherPayPubKey does not match expected recipient!', {
+                                noteOwnerKey,
+                                expectedRecipientKey,
+                            });
+                            // Continue anyway - might be a full transfer where both outputs go to recipient
+                        }
+                        
+                        // Get recipient's Curve25519 encryption public key from DB (SECURE approach)
+                        // This is a Curve25519 public key (base64), derived from wallet signature seed
+                        // The seed is never stored - only this public key is stored
+                        const recipientOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        console.log('[CipherPayService] Fetching note_enc_pub_key for recipient:', recipientOwnerKey);
+                        const recipientNoteEncPubKey = await getRecipientNoteEncPubKey(recipientOwnerKey);
+                        if (!recipientNoteEncPubKey) {
+                            const errorMsg = `Failed to get note_enc_pub_key for recipient ${recipientOwnerKey}. Recipient may not be registered yet.`;
+                            console.error('[CipherPayService]', errorMsg);
+                            throw new Error(errorMsg);
+                        }
+                        console.log('[CipherPayService] Successfully retrieved note_enc_pub_key for recipient');
+                        // Use Curve25519 public key directly (no derivation needed - it's already a Curve25519 key)
+                        // This public key was derived from wallet signature seed and stored in DB
+                        // Recipient will derive the matching keypair from their wallet signature seed when decrypting
+                        const recipientEncPubKeyB64 = recipientNoteEncPubKey; // Already base64 Curve25519 public key
+                        console.log('[CipherPayService] Out1 encryption - Using recipient Curve25519 public key directly from DB (first 20 chars):', recipientEncPubKeyB64.substring(0, 20) + '...');
+                        const noteData = {
+                            note: {
+                                amount: '0x' + note.amount.toString(16),
+                                tokenId: '0x' + note.tokenId.toString(16),
+                                ownerCipherPayPubKey: '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0'),
+                                randomness: {
+                                    r: '0x' + note.randomness.r.toString(16).padStart(64, '0'),
+                                    ...(note.randomness.s ? { s: '0x' + note.randomness.s.toString(16).padStart(64, '0') } : {}),
+                                },
+                                ...(note.memo ? { memo: '0x' + note.memo.toString(16) } : {}),
+                            },
+                        };
+                        const ciphertextB64 = encryptForRecipient(recipientEncPubKeyB64, noteData);
+                        const recipientKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        const messageResponse = await fetch(`${serverUrl}/api/v1/messages`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                            },
+                            body: JSON.stringify({
+                                recipientKey,
+                                ciphertextB64,
+                                kind: 'note-transfer',
+                            }),
+                        });
+                        if (messageResponse.ok) {
+                            const messageResult = await messageResponse.json();
+                            console.log('[CipherPayService] ✅ Successfully saved encrypted out1 note message:', messageResult);
+                            console.log('[CipherPayService] Out1 message saved with recipient_key:', recipientKey);
+                        } else {
+                            const errorText = await messageResponse.text();
+                            console.error('[CipherPayService] ❌ Failed to save out1 note message:', messageResponse.status, errorText);
+                            console.error('[CipherPayService] Out1 message details:', {
+                                recipientKey,
+                                kind: 'note-transfer',
+                                ciphertextLength: ciphertextB64.length,
+                            });
+                        }
+                    } catch (error) {
+                        console.error('[CipherPayService] ❌ Exception while saving encrypted out1 note message:', error);
+                        console.error('[CipherPayService] Error stack:', error.stack);
+                        // Don't throw - let the transfer continue even if message saving fails
+                    }
+                },
+                onOut2NoteReady: async (note) => {
+                    // Skip saving note if amount is 0 (should not happen, but defensive check)
+                    if (note.amount === 0n || note.amount === 0) {
+                        console.log('[CipherPayService] Out2 note has 0 amount, skipping save');
+                        return;
+                    }
+                    
+                    try {
+                        // For full transfer: out2 is for recipient (part of random split)
+                        // For partial transfer: out2 is change for sender
+                        console.log('[CipherPayService] Out2 note ready, encrypting and saving...', note);
+                        // Determine the actual recipient of this specific output note
+                        // If it's a change note for the sender, use the sender's encryption public key
+                        // Otherwise, use the recipient's encryption public key (from DB)
+                        const isChangeNoteForSender = !isFullTransfer && (note.ownerCipherPayPubKey === BigInt(inputNoteToUse.ownerCipherPayPubKey));
+                        let encryptionTargetPubKey;
+                        if (isChangeNoteForSender) {
+                            // Sender's own encryption key (derived from their privKey)
+                            encryptionTargetPubKey = getLocalEncPublicKeyB64();
+                        } else {
+                            // Get recipient's Curve25519 encryption public key from DB (SECURE approach)
+                            const recipientOwnerKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                            const recipientNoteEncPubKey = await getRecipientNoteEncPubKey(recipientOwnerKey);
+                            if (!recipientNoteEncPubKey) {
+                                throw new Error(`Failed to get note_enc_pub_key for recipient ${recipientOwnerKey}`);
+                            }
+                            // Use Curve25519 public key directly (no derivation needed - it's already a Curve25519 key)
+                            encryptionTargetPubKey = recipientNoteEncPubKey;
+                        }
+                        console.log('[CipherPayService] Out2 encryption - Using public key (first 20 chars):', encryptionTargetPubKey.substring(0, 20) + '...');
+                        const noteData = {
+                            note: {
+                                amount: '0x' + note.amount.toString(16),
+                                tokenId: '0x' + note.tokenId.toString(16),
+                                ownerCipherPayPubKey: '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0'),
+                                randomness: {
+                                    r: '0x' + note.randomness.r.toString(16).padStart(64, '0'),
+                                    ...(note.randomness.s ? { s: '0x' + note.randomness.s.toString(16).padStart(64, '0') } : {}),
+                                },
+                                ...(note.memo ? { memo: '0x' + note.memo.toString(16) } : {}),
+                            },
+                        };
+                        const ciphertextB64 = encryptForRecipient(encryptionTargetPubKey, noteData);
+                        const recipientKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
+                        const messageResponse = await fetch(`${serverUrl}/api/v1/messages`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                            },
+                            body: JSON.stringify({
+                                recipientKey,
+                                ciphertextB64,
+                                kind: 'note-transfer',
+                            }),
+                        });
+                        if (messageResponse.ok) {
+                            const messageResult = await messageResponse.json();
+                            console.log('[CipherPayService] Saved encrypted out2 note message (change):', messageResult);
+                        } else {
+                            const errorText = await messageResponse.text();
+                            console.warn('[CipherPayService] Failed to save out2 note message:', errorText);
+                        }
+                    } catch (error) {
+                        console.warn('[CipherPayService] Failed to save encrypted out2 note message:', error);
+                    }
+                },
+            };
+
+            // Call SDK transfer
+            const result = await window.CipherPaySDK.transfer(transferParams);
 
             return {
                 recipient: recipientPublicKey,
                 amount: amount,
+                changeAmount: changeAmount,
                 timestamp: Date.now(),
-                id: result.txHash,
-                stealthAddress: result.stealthAddress,
-                proof: result.proof,
-                complianceStatus: result.complianceStatus
+                id: result.txId || result.signature,
+                txHash: result.txId || result.signature,
+                out1Commitment: result.out1Commitment?.toString(),
+                out2Commitment: result.out2Commitment?.toString(),
+                nullifier: result.nullifier?.toString(),
             };
         } catch (error) {
-            console.error('Failed to create transaction:', error);
+            console.error('[CipherPayService] Failed to execute single transfer:', error);
             throw error;
         }
     }
@@ -282,11 +1013,16 @@ class CipherPayService {
         if (!this.isInitialized) await this.initialize();
 
         try {
-            // The transaction is already sent when created via SDK
+            // The transaction is already sent when created via SDK transfer
             // This method is kept for compatibility with the UI
+            // Return the transaction details as receipt
             return {
-                txHash: transaction.id,
-                status: 'success'
+                txHash: transaction.id || transaction.txHash,
+                status: 'success',
+                signature: transaction.id || transaction.txHash,
+                out1Commitment: transaction.out1Commitment,
+                out2Commitment: transaction.out2Commitment,
+                nullifier: transaction.nullifier
             };
         } catch (error) {
             console.error('Failed to send transaction:', error);
@@ -680,13 +1416,14 @@ class CipherPayService {
         const publicAddress = this.getPublicAddress();
         const balance = this.getBalance();
         const isConnected = !!(this.sdk?.walletProvider && publicAddress && typeof publicAddress === 'string' && publicAddress.length > 0);
+        const spendableNotes = await this.getSpendableNotes();
         console.log('[CipherPayService] getServiceStatus returning:', { isConnected, publicAddress, balance });
         return {
             isInitialized: this.isInitialized,
             isConnected,
             publicAddress: publicAddress || null,
             balance,
-            spendableNotes: this.getSpendableNotes().length,
+            spendableNotes: spendableNotes.length,
             totalNotes: allNotes.length,
             cacheStats: this.getCacheStats(),
             chainType: this.config.chainType

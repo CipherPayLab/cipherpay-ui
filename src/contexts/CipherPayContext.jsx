@@ -170,8 +170,9 @@ export const CipherPayProvider = ({ children }) => {
             setBalance(status.balance);
         }
 
-        // Update notes from SDK
-        setSpendableNotes(cipherPayService.getSpendableNotes());
+        // Update notes from backend (database)
+        const spendableNotes = await cipherPayService.getSpendableNotes();
+        setSpendableNotes(spendableNotes);
         const notes = await cipherPayService.getAllNotes();
         setAllNotes(Array.isArray(notes) ? notes : []);
 
@@ -302,11 +303,20 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Transfer Management
-    const createTransfer = async (recipientPublicKey, amount) => {
+    const createTransfer = async (recipientPublicKey, amount, inputNote = null) => {
         try {
             setLoading(true);
             setError(null);
-            const transaction = await cipherPayService.createTransaction(recipientPublicKey, amount);
+            console.log('[CipherPayContext] createTransfer: Called with recipientPublicKey:', recipientPublicKey, 'amount:', amount.toString());
+            const transaction = await cipherPayService.createTransaction(recipientPublicKey, amount, inputNote);
+            console.log('[CipherPayContext] createTransfer: Transaction created:', transaction);
+            
+            // Refresh account overview after transfer
+            setTimeout(() => {
+                console.log('[CipherPayContext] createTransfer: Triggering account overview refresh after transfer');
+                updateServiceStatus();
+            }, 1000); // Wait a bit for backend to process the transfer
+            
             return transaction;
         } catch (err) {
             setError(err.message);
@@ -420,6 +430,24 @@ export const CipherPayProvider = ({ children }) => {
                     }
                 }
                 
+                // Check wallet SOL balance before attempting wrap
+                const walletBalance = await connection.getBalance(solanaPublicKey);
+                const estimatedTxFee = 5000; // Rough estimate for transaction fees
+                const neededForWrap = requiredLamports - currentBalance;
+                
+                // If we need to wrap, check if wallet has enough SOL
+                if (currentBalance < requiredLamports) {
+                    if (walletBalance < neededForWrap + estimatedTxFee) {
+                        const availableSOL = walletBalance / 1e9;
+                        const requiredSOL = (neededForWrap + estimatedTxFee) / 1e9;
+                        throw new Error(
+                            `Not enough balance in the wallet to deposit. ` +
+                            `Required: ${requiredSOL.toFixed(9)} SOL (${(neededForWrap / 1e9).toFixed(9)} SOL for deposit + ~${(estimatedTxFee / 1e9).toFixed(9)} SOL for fees). ` +
+                            `Available: ${availableSOL.toFixed(9)} SOL`
+                        );
+                    }
+                }
+                
                 // Wrap SOL to wSOL if needed
                 if (currentBalance < requiredLamports) {
                     const delta = requiredLamports - currentBalance;
@@ -445,10 +473,26 @@ export const CipherPayProvider = ({ children }) => {
                         createSyncNativeInstruction(wsolAta)
                     );
                     
-                    // Send transaction
-                    const signature = await sendTransaction(tx, connection);
-                    await connection.confirmTransaction(signature, 'confirmed');
-                    console.log('[CipherPayContext] Wrapped', delta / 1e9, 'SOL to wSOL:', signature);
+                    // Send transaction with better error handling
+                    try {
+                        const signature = await sendTransaction(tx, connection);
+                        await connection.confirmTransaction(signature, 'confirmed');
+                        console.log('[CipherPayContext] Wrapped', delta / 1e9, 'SOL to wSOL:', signature);
+                    } catch (txError) {
+                        // Provide clearer error messages for common wallet errors
+                        const errorMessage = txError?.message || String(txError);
+                        if (errorMessage.includes('insufficient') || errorMessage.includes('balance') || errorMessage.includes('funds')) {
+                            const availableSOL = walletBalance / 1e9;
+                            const requiredSOL = (neededForWrap + estimatedTxFee) / 1e9;
+                            throw new Error(
+                                `Not enough balance in the wallet to deposit. ` +
+                                `Required: ${requiredSOL.toFixed(9)} SOL (${(neededForWrap / 1e9).toFixed(9)} SOL for deposit + ~${(estimatedTxFee / 1e9).toFixed(9)} SOL for fees). ` +
+                                `Available: ${availableSOL.toFixed(9)} SOL`
+                            );
+                        }
+                        // Re-throw with a more descriptive message
+                        throw new Error(`Failed to wrap SOL to wSOL: ${errorMessage}`);
+                    }
                 }
                 
                 useDelegate = true;
@@ -476,8 +520,28 @@ export const CipherPayProvider = ({ children }) => {
             return result;
         } catch (err) {
             console.error('[CipherPayContext] createDeposit: Error:', err);
-            setError(err.message);
-            throw err;
+            
+            // Provide clearer error messages
+            let errorMessage = err?.message || String(err);
+            
+            // Check for common wallet error patterns
+            if (errorMessage.includes('insufficient') || errorMessage.includes('balance') || errorMessage.includes('funds')) {
+                // Already has a clear message from our validation
+                errorMessage = err.message;
+            } else if (errorMessage.includes('User rejected') || errorMessage.includes('rejected')) {
+                errorMessage = 'Transaction was rejected by the wallet. Please try again.';
+            } else if (errorMessage.includes('Unexpected error') || errorMessage.includes('WalletSendTransactionError')) {
+                // Try to extract more details from the error
+                const errorDetails = err?.cause || err?.error || err;
+                if (errorDetails?.message) {
+                    errorMessage = `Wallet transaction failed: ${errorDetails.message}`;
+                } else {
+                    errorMessage = 'Wallet transaction failed. Please check your wallet balance and try again.';
+                }
+            }
+            
+            setError(errorMessage);
+            throw new Error(errorMessage);
         } finally {
             setLoading(false);
         }
