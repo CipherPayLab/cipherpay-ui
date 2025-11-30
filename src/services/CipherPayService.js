@@ -313,6 +313,160 @@ class CipherPayService {
                 throw new Error('Identity not found. Please authenticate first.');
             }
 
+            // Validate: Prevent transfers to self
+            // Compute sender's ownerCipherPayPubKey from identity wallet keys
+            const ownerWalletPubKey = identity.ownerWalletPubKey || BigInt(0);
+            const ownerWalletPrivKey = identity.ownerWalletPrivKey || BigInt(0);
+            
+            // Derive sender's ownerCipherPayPubKey using poseidonHash (same as SDK does)
+            const { poseidonHash } = window.CipherPaySDK || {};
+            if (!poseidonHash) {
+                throw new Error('SDK poseidonHash not available');
+            }
+            const senderOwnerCipherPayPubKey = await poseidonHash([ownerWalletPubKey, ownerWalletPrivKey]);
+            const senderOwnerKeyHex = '0x' + senderOwnerCipherPayPubKey.toString(16).padStart(64, '0').toLowerCase();
+            
+            // Normalize recipient public key for comparison
+            let normalizedRecipientKey;
+            if (typeof recipientPublicKey === 'string') {
+                normalizedRecipientKey = recipientPublicKey.startsWith('0x')
+                    ? recipientPublicKey.toLowerCase()
+                    : '0x' + recipientPublicKey.toLowerCase();
+            } else {
+                normalizedRecipientKey = '0x' + recipientPublicKey.toString(16).padStart(64, '0').toLowerCase();
+            }
+            
+            if (normalizedRecipientKey === senderOwnerKeyHex) {
+                alert('Cannot transfer to yourself!');
+                throw new Error('Cannot transfer to yourself!');
+            }
+
+            // Validate: Recipient must exist in database and have valid keys
+            const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+            const authToken = localStorage.getItem('cipherpay_token');
+            
+            // Helper function to validate owner_cipherpay_pub_key format
+            const validateOwnerCipherPayPubKey = (key) => {
+                if (!key || typeof key !== 'string') {
+                    return { valid: false, error: 'owner_cipherpay_pub_key must be a string' };
+                }
+                
+                // Must start with 0x
+                if (!key.startsWith('0x')) {
+                    return { valid: false, error: 'owner_cipherpay_pub_key must start with 0x' };
+                }
+                
+                // Must be exactly 66 characters (0x + 64 hex digits)
+                if (key.length !== 66) {
+                    return { valid: false, error: `owner_cipherpay_pub_key must be 66 characters (got ${key.length})` };
+                }
+                
+                // Must be valid hex (only 0-9, a-f, A-F after 0x)
+                const hexPart = key.substring(2);
+                if (!/^[0-9a-fA-F]+$/.test(hexPart)) {
+                    return { valid: false, error: 'owner_cipherpay_pub_key contains invalid hex characters' };
+                }
+                
+                // Must be a valid BigInt
+                try {
+                    const keyBigInt = BigInt(key);
+                    if (keyBigInt === 0n) {
+                        return { valid: false, error: 'owner_cipherpay_pub_key cannot be zero' };
+                    }
+                } catch (e) {
+                    return { valid: false, error: `owner_cipherpay_pub_key is not a valid BigInt: ${e.message}` };
+                }
+                
+                return { valid: true };
+            };
+            
+            // Helper function to validate note_enc_pub_key format (base64 Curve25519 public key)
+            const validateNoteEncPubKey = (key) => {
+                if (!key || typeof key !== 'string') {
+                    return { valid: false, error: 'note_enc_pub_key must be a string' };
+                }
+                
+                // Base64 encoded Curve25519 public key should be 44 characters (32 bytes = 44 base64 chars)
+                // With padding it could be 44-48 characters
+                if (key.length < 44 || key.length > 48) {
+                    return { valid: false, error: `note_enc_pub_key must be 44-48 characters (got ${key.length})` };
+                }
+                
+                // Must be valid base64
+                try {
+                    // Try to decode base64
+                    const decoded = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
+                    const bytes = new Uint8Array(decoded.length);
+                    for (let i = 0; i < decoded.length; i++) {
+                        bytes[i] = decoded.charCodeAt(i);
+                    }
+                    
+                    // Curve25519 public key must be exactly 32 bytes
+                    if (bytes.length !== 32) {
+                        return { valid: false, error: `note_enc_pub_key must decode to exactly 32 bytes (got ${bytes.length})` };
+                    }
+                } catch (e) {
+                    return { valid: false, error: `note_enc_pub_key is not valid base64: ${e.message}` };
+                }
+                
+                return { valid: true };
+            };
+            
+            // Validate recipient's owner_cipherpay_pub_key format
+            const ownerKeyValidation = validateOwnerCipherPayPubKey(normalizedRecipientKey);
+            if (!ownerKeyValidation.valid) {
+                console.error('[CipherPayService] Invalid owner_cipherpay_pub_key format:', ownerKeyValidation.error);
+                alert('Invalid recipient!');
+                throw new Error(`Invalid recipient! ${ownerKeyValidation.error}`);
+            }
+            
+            try {
+                const response = await fetch(`${serverUrl}/api/v1/users/note-enc-pub-key/${normalizedRecipientKey}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                    },
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        alert('Invalid recipient!');
+                        throw new Error('Invalid recipient! Recipient not found or missing required keys.');
+                    } else {
+                        const errorText = await response.text();
+                        console.error('[CipherPayService] Failed to validate recipient:', response.status, errorText);
+                        alert('Invalid recipient!');
+                        throw new Error(`Failed to validate recipient: ${response.status}`);
+                    }
+                }
+                
+                const data = await response.json();
+                if (!data.noteEncPubKey) {
+                    alert('Invalid recipient!');
+                    throw new Error('Invalid recipient! Recipient missing note encryption public key.');
+                }
+                
+                // Validate note_enc_pub_key format
+                const noteEncKeyValidation = validateNoteEncPubKey(data.noteEncPubKey);
+                if (!noteEncKeyValidation.valid) {
+                    console.error('[CipherPayService] Invalid note_enc_pub_key format:', noteEncKeyValidation.error);
+                    alert('Invalid recipient!');
+                    throw new Error(`Invalid recipient! Corrupted note_enc_pub_key: ${noteEncKeyValidation.error}`);
+                }
+                
+                console.log('[CipherPayService] Recipient validated successfully with valid keys');
+            } catch (error) {
+                // If it's already our custom error, re-throw it
+                if (error.message.includes('Invalid recipient') || error.message.includes('Cannot transfer')) {
+                    throw error;
+                }
+                // Otherwise, it's a network/API error
+                console.error('[CipherPayService] Error validating recipient:', error);
+                alert('Invalid recipient!');
+                throw new Error('Invalid recipient! Failed to verify recipient in database.');
+            }
+
             // NOTE SELECTION STRATEGY
             let selectedNotes = [];
             
