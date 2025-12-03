@@ -29,7 +29,7 @@ class CipherPayService {
         this.config = {
             chainType: 'solana', // Use string instead of ChainType enum
             rpcUrl: import.meta.env.VITE_RPC_URL || 'http://127.0.0.1:8899',
-            relayerUrl: import.meta.env.VITE_RELAYER_URL || 'http://localhost:3000',
+            relayerUrl: import.meta.env.VITE_RELAYER_URL || import.meta.env.VITE_SERVER_URL || 'http://localhost:8788',
             relayerApiKey: import.meta.env.VITE_RELAYER_API_KEY,
             contractAddress: import.meta.env.VITE_CONTRACT_ADDRESS,
             programId: import.meta.env.VITE_PROGRAM_ID || 'BCrt2kn5HR4B7CHEMSBacekhzVTKYhzAQAB5YNkr5kJf', // Solana program ID
@@ -1349,34 +1349,318 @@ class CipherPayService {
     }
 
     // Withdrawal Management
-    async withdraw(amount, recipientAddress) {
+    // New design: Always withdraw the full amount of a selected note
+    // 1. Get spendable notes for selection (or auto-select if only one)
+    // 2. Withdraw the full amount of the selected note
+    
+    /**
+     * Get spendable notes for withdraw selection
+     * Returns notes that can be withdrawn (amount >= 0.001 SOL)
+     */
+    async getWithdrawableNotes() {
         if (!this.isInitialized) await this.initialize();
 
         try {
-            const withdrawRequest = {
-                amount: BigInt(amount),
-                recipientAddress: recipientAddress,
-                complianceCheck: true,
-                metadata: {
-                    timestamp: Date.now(),
-                    source: 'cipherpay-ui'
-                }
-            };
-
-            const result = await this.sdk.withdraw(withdrawRequest);
-
-            if (!result.success) {
-                throw new Error(result.error || 'Withdrawal failed');
+            // Get spendable notes from backend database
+            const spendable = await this.getSpendableNotes();
+            if (spendable.length === 0) {
+                return [];
             }
 
+            // Filter out notes that are less than minimum withdraw amount
+            const MIN_WITHDRAW_AMOUNT = 1_000_000n; // 0.001 SOL
+            const validNotes = spendable.filter(n => BigInt(n.amount) >= MIN_WITHDRAW_AMOUNT);
+            
+            // Return notes with formatted amounts for display
+            return validNotes.map(note => ({
+                ...note,
+                amountFormatted: (Number(note.amount) / 1e9).toFixed(9) + ' SOL',
+                amountBigInt: BigInt(note.amount)
+            }));
+        } catch (error) {
+            console.error('[CipherPayService] Failed to get withdrawable notes:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Withdraw the full amount of a selected note
+     * @param {Object} selectedNote - The note to withdraw (must have amount, tokenId, ownerCipherPayPubKey, randomness)
+     * @param {string} recipientSolanaAddress - Solana wallet address to receive the funds
+     */
+    async withdraw(selectedNote, recipientSolanaAddress) {
+        if (!this.isInitialized) await this.initialize();
+
+        try {
+            console.log('[CipherPayService] withdraw called with selected note:', {
+                noteAmount: selectedNote.amount?.toString(),
+                recipientSolanaAddress
+            });
+
+            // Validate required parameters
+            if (!selectedNote) throw new Error('Note is required');
+            if (!recipientSolanaAddress) throw new Error('Recipient Solana address is required');
+            
+            // Validate note structure
+            if (!selectedNote.amount || !selectedNote.tokenId || !selectedNote.ownerCipherPayPubKey || !selectedNote.randomness) {
+                throw new Error('Invalid note structure');
+            }
+
+            // Minimum withdraw amount: 0.001 SOL (1,000,000 atoms)
+            const MIN_WITHDRAW_AMOUNT = 1_000_000n; // 0.001 SOL
+            const noteAmount = BigInt(selectedNote.amount);
+            if (noteAmount < MIN_WITHDRAW_AMOUNT) {
+                throw new Error(`Note amount must be at least 0.001 SOL. Current: ${(Number(noteAmount) / 1e9).toFixed(9)} SOL`);
+            }
+
+            // Get identity from stored keys
+            const identity = await this.getIdentity();
+            if (!identity) {
+                throw new Error('Identity not found. Please authenticate first.');
+            }
+
+            console.log('[CipherPayService] Withdrawing full amount of selected note:', {
+                noteAmount: noteAmount.toString(),
+                amountFormatted: (Number(noteAmount) / 1e9).toFixed(9) + ' SOL'
+            });
+
+            // Get wallet keys from identity
+            const recipientWalletPubKey = identity.ownerWalletPubKey || BigInt(0);
+            const recipientWalletPrivKey = identity.ownerWalletPrivKey || BigInt(0);
+
+            // Compute commitment for the selected note
+            const { poseidonHash } = window.CipherPaySDK || {};
+            if (!poseidonHash) {
+                throw new Error('SDK poseidonHash not available');
+            }
+
+            const recipientCipherPayPubKey = await poseidonHash([recipientWalletPubKey, recipientWalletPrivKey]);
+            // noteAmount already declared above
+            const tokenId = BigInt(selectedNote.tokenId);
+            const randomnessValue = selectedNote.randomness;
+            const randomness = BigInt(
+                typeof randomnessValue === 'object' && randomnessValue !== null && randomnessValue.r !== undefined
+                    ? randomnessValue.r
+                    : randomnessValue
+            );
+            const memo = 0n; // Withdraw doesn't use memo
+
+            // Compute commitment
+            const commitment = await poseidonHash([
+                noteAmount,
+                recipientCipherPayPubKey,
+                randomness,
+                tokenId,
+                memo
+            ]);
+
+            console.log('[CipherPayService] Computed commitment for withdraw:', commitment.toString(16));
+
+            // Step 1: Prepare withdraw - get merkle path
+            const relayerUrl = this.config.relayerUrl || 'http://localhost:3000';
+            const prepareResponse = await fetch(`${relayerUrl}/api/v1/prepare/withdraw`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    spendCommitment: commitment.toString(10)
+                })
+            });
+
+            if (!prepareResponse.ok) {
+                const errorText = await prepareResponse.text();
+                throw new Error(`Failed to prepare withdraw: ${prepareResponse.status} ${errorText}`);
+            }
+
+            const prepareData = await prepareResponse.json();
+            console.log('[CipherPayService] Withdraw prepare response:', {
+                merkleRoot: prepareData.merkleRoot,
+                leafIndex: prepareData.leafIndex,
+                pathElementsCount: prepareData.pathElements?.length,
+                pathIndicesCount: prepareData.pathIndices?.length
+            });
+
+            // Step 2: Split recipient Solana public key into 128-bit limbs
+            // Convert base58 address to bytes, then split into two 16-byte LE integers
+            const { PublicKey } = await import('@solana/web3.js');
+            const recipientPubKey = new PublicKey(recipientSolanaAddress);
+            const pubKeyBytes = recipientPubKey.toBytes(); // 32 bytes, big-endian/network order
+
+            // Split into two 16-byte chunks and interpret each as little-endian
+            function bigIntFromBytesLE(bytes) {
+                let result = 0n;
+                for (let i = 0; i < bytes.length; i++) {
+                    result += BigInt(bytes[i]) << (8n * BigInt(i));
+                }
+                return result;
+            }
+
+            const loBytes = pubKeyBytes.slice(0, 16);
+            const hiBytes = pubKeyBytes.slice(16, 32);
+            const recipientOwner_lo = bigIntFromBytesLE(loBytes);
+            const recipientOwner_hi = bigIntFromBytesLE(hiBytes);
+
+            // Convert to hex32 for submission (32 hex chars = 16 bytes)
+            const hex32 = (bi) => bi.toString(16).padStart(32, '0');
+            const recipientOwner_lo_hex = hex32(recipientOwner_lo);
+            const recipientOwner_hi_hex = hex32(recipientOwner_hi);
+
+            console.log('[CipherPayService] Recipient owner limbs:', {
+                lo_hex: recipientOwner_lo_hex,
+                hi_hex: recipientOwner_hi_hex,
+                lo_dec: recipientOwner_lo.toString(),
+                hi_dec: recipientOwner_hi.toString()
+            });
+
+            // Step 3: Build circuit witness inputs
+            const FQ = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+            const modF = (x) => ((x % FQ) + FQ) % FQ;
+
+            // Convert path elements from hex (BE) to bigint
+            const pathElements = prepareData.pathElements.map(hex => {
+                // Convert BE hex to bigint
+                const hexStr = hex.startsWith('0x') ? hex.slice(2) : hex;
+                return modF(BigInt('0x' + hexStr));
+            });
+
+            const witnessInputs = {
+                recipientOwner_lo: modF(recipientOwner_lo).toString(),
+                recipientOwner_hi: modF(recipientOwner_hi).toString(),
+                recipientWalletPubKey: modF(recipientWalletPubKey).toString(),
+                recipientWalletPrivKey: modF(recipientWalletPrivKey).toString(),
+                amount: modF(noteAmount).toString(),
+                tokenId: modF(tokenId).toString(),
+                randomness: modF(randomness).toString(),
+                memo: modF(memo).toString(),
+                pathElements: pathElements.map(p => p.toString()),
+                pathIndices: prepareData.pathIndices,
+                commitment: modF(commitment).toString()
+            };
+
+            console.log('[CipherPayService] Withdraw witness inputs prepared');
+
+            // Step 4: Generate withdraw proof
+            // Compute nullifier for verification
+            const nullifier = await poseidonHash([
+                recipientCipherPayPubKey,
+                randomness,
+                tokenId
+            ]);
+
+            // Try to generate proof using SDK's proof generation utilities
+            // Check if SDK has withdraw proof generation capability
+            let proof = null;
+            let publicSignals = [];
+            
+            // Try to use SDK's zkProver if available
+            if (this.sdk?.zkProver?.generateWithdrawProof) {
+                try {
+                    console.log('[CipherPayService] Generating withdraw proof using SDK zkProver...');
+                    const proofResult = await this.sdk.zkProver.generateWithdrawProof(witnessInputs);
+                    proof = proofResult.proof;
+                    publicSignals = proofResult.publicSignals;
+                    console.log('[CipherPayService] Withdraw proof generated successfully');
+                } catch (proofError) {
+                    console.error('[CipherPayService] Failed to generate proof using SDK zkProver:', proofError);
+                    throw new Error(`Failed to generate withdraw proof: ${proofError.message}`);
+                }
+            } else {
+                // SDK withdraw proof generation not available
+                // For now, we need to implement this in the SDK or use a server endpoint
+                throw new Error(
+                    'Withdraw proof generation not yet implemented in SDK. ' +
+                    'The SDK needs to implement generateWithdrawProof in zkProver. ' +
+                    'Alternatively, a server endpoint can be created to generate proofs server-side.'
+                );
+            }
+
+            // Step 5: Submit withdraw to relayer
+            const relayerApiKey = this.config.relayerApiKey;
+            const submitBody = {
+                operation: 'withdraw',
+                tokenMint: 'So11111111111111111111111111111111111111112', // wSOL mint
+                proof: proof,
+                publicSignals: publicSignals,
+                nullifier: nullifier.toString(16).padStart(64, '0'),
+                oldMerkleRoot: prepareData.merkleRoot,
+                recipientWalletPubKey: recipientWalletPubKey.toString(16).padStart(64, '0'),
+                amount: noteAmount.toString(),
+                tokenId: tokenId.toString(),
+                recipientOwner_lo: '0x' + recipientOwner_lo_hex,
+                recipientOwner_hi: '0x' + recipientOwner_hi_hex,
+                recipientOwner: recipientSolanaAddress,
+                // recipientTokenAccount will be derived by relayer from recipientOwner
+            };
+
+            console.log('[CipherPayService] Submitting withdraw to relayer...');
+            const submitResponse = await fetch(`${relayerUrl}/api/v1/submit/withdraw`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(relayerApiKey ? { 'Authorization': `Bearer ${relayerApiKey}` } : {}),
+                },
+                body: JSON.stringify(submitBody)
+            });
+
+            if (!submitResponse.ok) {
+                const errorText = await submitResponse.text();
+                throw new Error(`Failed to submit withdraw: ${submitResponse.status} ${errorText}`);
+            }
+
+            const submitResult = await submitResponse.json();
+            console.log('[CipherPayService] Withdraw submitted successfully:', submitResult);
+            const registeredTxSignature = submitResult.signature || submitResult.txid || submitResult.txSig || submitResult.txHash;
+            this.registerWithdrawMapping(selectedNote, registeredTxSignature).catch(err => {
+                console.warn('[CipherPayService] Failed to register withdraw mapping:', err);
+            });
+
             return {
-                txHash: result.txHash,
-                proof: result.proof,
-                complianceStatus: result.complianceStatus
+                txHash: submitResult.signature || submitResult.txid || submitResult.txSig || 'pending',
+                signature: submitResult.signature || submitResult.txid || submitResult.txSig,
+                success: submitResult.ok !== false
             };
         } catch (error) {
-            console.error('Failed to withdraw:', error);
+            console.error('[CipherPayService] Failed to withdraw:', error);
             throw error;
+        }
+    }
+
+    async registerWithdrawMapping(selectedNote, txSignature) {
+        if (!txSignature || !selectedNote) return;
+        try {
+            const toHex = (value) => {
+                if (typeof value === 'string') {
+                    return value.startsWith('0x') ? value : '0x' + BigInt(value).toString(16);
+                }
+                if (typeof value === 'bigint') {
+                    return '0x' + value.toString(16);
+                }
+                return '0x' + BigInt(value).toString(16);
+            };
+
+            const payload = {
+                txSignature,
+                ownerCipherPayPubKey: toHex(selectedNote.ownerCipherPayPubKey),
+                tokenId: toHex(selectedNote.tokenId),
+                randomness: {
+                    r: toHex(selectedNote.randomness?.r ?? selectedNote.randomness),
+                    ...(selectedNote.randomness?.s ? { s: toHex(selectedNote.randomness.s) } : {}),
+                },
+            };
+
+            const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+            const authToken = localStorage.getItem('cipherpay_token');
+            await fetch(`${serverUrl}/api/v1/withdraws/map`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                },
+                body: JSON.stringify(payload),
+            });
+        } catch (error) {
+            console.warn('[CipherPayService] withdraw mapping registration failed:', error);
         }
     }
 
