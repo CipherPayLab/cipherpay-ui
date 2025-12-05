@@ -810,6 +810,18 @@ class CipherPayService {
                 memo: convertedMemo,
             };
             
+            // Compute nullifier from input note (for storing with transfer messages)
+            const { poseidonHash } = window.CipherPaySDK || {};
+            if (!poseidonHash) {
+                throw new Error('SDK poseidonHash not available');
+            }
+            const inputNullifier = await poseidonHash([
+                inputNoteObj.ownerCipherPayPubKey,
+                convertedRandomnessR,
+                convertedTokenId
+            ]);
+            const inputNullifierHex = inputNullifier.toString(16).padStart(64, '0');
+            
             // Determine recipient for each output
             // For full transfer: both outputs go to recipient
             // For partial transfer: out1 goes to recipient, out2 goes to sender (change)
@@ -899,6 +911,7 @@ class CipherPayService {
                                 recipientKey,
                                 ciphertextB64,
                                 kind: 'note-transfer',
+                                nullifierHex: inputNullifierHex, // Store input note's nullifier with both output messages
                             }),
                         });
                         if (messageResponse.ok) {
@@ -974,6 +987,7 @@ class CipherPayService {
                                 recipientKey,
                                 ciphertextB64,
                                 kind: 'note-transfer',
+                                nullifierHex: inputNullifierHex, // Store input note's nullifier with both output messages
                             }),
                         });
                         if (messageResponse.ok) {
@@ -1157,6 +1171,20 @@ class CipherPayService {
                     // Get encryption public key (will validate and recreate if corrupted)
                     const recipientEncPubKeyB64 = getLocalEncPublicKeyB64();
                     
+                    // Compute commitment for deposit message (stored in nullifier_hex field for consistency)
+                    const { poseidonHash } = window.CipherPaySDK || {};
+                    if (!poseidonHash) {
+                        throw new Error('SDK poseidonHash not available');
+                    }
+                    const commitment = await poseidonHash([
+                        note.amount,
+                        note.ownerCipherPayPubKey,
+                        note.randomness.r,
+                        note.tokenId,
+                        note.memo || 0n
+                    ]);
+                    const commitmentHex = commitment.toString(16).padStart(64, '0');
+                    
                     // Format note data as hex strings (with 0x prefix) for consistency with decrypt function
                     const noteData = {
                         note: {
@@ -1176,7 +1204,7 @@ class CipherPayService {
                     console.log('[CipherPayService] Encryption successful, ciphertext length:', ciphertextB64.length);
                     const recipientKey = '0x' + note.ownerCipherPayPubKey.toString(16).padStart(64, '0');
                     
-                    // Send encrypted message to backend
+                    // Send encrypted message to backend with commitment_hex (stored in nullifier_hex field)
                     const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
                     const messageResponse = await fetch(`${serverUrl}/api/v1/messages`, {
                         method: 'POST',
@@ -1188,6 +1216,7 @@ class CipherPayService {
                             recipientKey,
                             ciphertextB64,
                             kind: 'note-deposit',
+                            nullifierHex: commitmentHex, // Store commitment in nullifier_hex field for consistency
                         }),
                     });
                     
@@ -1481,6 +1510,67 @@ class CipherPayService {
                 pathIndicesCount: prepareData.pathIndices?.length
             });
 
+            // Step 1.5: Create withdraw message during prepare phase (before proof generation)
+            // This follows the same pattern as deposits and transfers
+            const nullifier = await poseidonHash([
+                recipientCipherPayPubKey,
+                randomness,
+                tokenId
+            ]);
+            const nullifierHex = nullifier.toString(16).padStart(64, '0');
+            
+            try {
+                const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+                const authToken = localStorage.getItem('cipherpay_token');
+                
+                // Get the user's encryption public key for encrypting the withdraw message
+                const recipientEncPubKeyB64 = await getLocalEncPublicKeyB64();
+                if (recipientEncPubKeyB64) {
+                    // Create withdraw metadata (pending - will be updated when event is received)
+                    const withdrawData = {
+                        nullifier: nullifierHex,
+                        recipientSolanaAddress: recipientSolanaAddress,
+                        amount: noteAmount.toString(),
+                        tokenId: tokenId.toString(),
+                        txSignature: null, // Will be updated when WithdrawCompleted event is received
+                        status: 'pending',
+                        timestamp: new Date().toISOString()
+                    };
+                    
+                    // Encrypt the withdraw data
+                    const ciphertextB64 = encryptForRecipient(recipientEncPubKeyB64, withdrawData);
+                    
+                    // Get the user's ownerCipherPayPubKey for recipient_key
+                    const recipientKey = '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0');
+                    
+                    // Save the withdraw message with nullifier_hex for later lookup
+                    const messageResponse = await fetch(`${serverUrl}/api/v1/messages`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+                        },
+                        body: JSON.stringify({
+                            recipientKey,
+                            ciphertextB64,
+                            kind: 'note-withdraw',
+                            nullifierHex: nullifierHex,
+                        }),
+                    });
+                    
+                    if (messageResponse.ok) {
+                        const messageResult = await messageResponse.json();
+                        console.log('[CipherPayService] Saved withdraw message during prepare:', messageResult);
+                    } else {
+                        const errorText = await messageResponse.text();
+                        console.warn('[CipherPayService] Failed to save withdraw message during prepare:', errorText);
+                    }
+                }
+            } catch (error) {
+                console.warn('[CipherPayService] Failed to create withdraw message during prepare:', error);
+                // Don't throw - withdraw can continue even if message save fails
+            }
+
             // Step 2: Split recipient Solana public key into 128-bit limbs
             // Convert base58 address to bytes, then split into two 16-byte LE integers
             const { PublicKey } = await import('@solana/web3.js');
@@ -1541,12 +1631,7 @@ class CipherPayService {
             console.log('[CipherPayService] Withdraw witness inputs prepared');
 
             // Step 4: Generate withdraw proof
-            // Compute nullifier for verification
-            const nullifier = await poseidonHash([
-                recipientCipherPayPubKey,
-                randomness,
-                tokenId
-            ]);
+            // Note: nullifier was already computed above for message creation
 
             // Try to generate proof using SDK's proof generation utilities
             // Check if SDK has withdraw proof generation capability
@@ -1610,10 +1695,9 @@ class CipherPayService {
 
             const submitResult = await submitResponse.json();
             console.log('[CipherPayService] Withdraw submitted successfully:', submitResult);
-            const registeredTxSignature = submitResult.signature || submitResult.txid || submitResult.txSig || submitResult.txHash;
-            this.registerWithdrawMapping(selectedNote, registeredTxSignature).catch(err => {
-                console.warn('[CipherPayService] Failed to register withdraw mapping:', err);
-            });
+
+            // Note: Message was already created during prepare phase
+            // It will be updated by the event listener when WithdrawCompleted event is received
 
             return {
                 txHash: submitResult.signature || submitResult.txid || submitResult.txSig || 'pending',
@@ -1626,43 +1710,6 @@ class CipherPayService {
         }
     }
 
-    async registerWithdrawMapping(selectedNote, txSignature) {
-        if (!txSignature || !selectedNote) return;
-        try {
-            const toHex = (value) => {
-                if (typeof value === 'string') {
-                    return value.startsWith('0x') ? value : '0x' + BigInt(value).toString(16);
-                }
-                if (typeof value === 'bigint') {
-                    return '0x' + value.toString(16);
-                }
-                return '0x' + BigInt(value).toString(16);
-            };
-
-            const payload = {
-                txSignature,
-                ownerCipherPayPubKey: toHex(selectedNote.ownerCipherPayPubKey),
-                tokenId: toHex(selectedNote.tokenId),
-                randomness: {
-                    r: toHex(selectedNote.randomness?.r ?? selectedNote.randomness),
-                    ...(selectedNote.randomness?.s ? { s: toHex(selectedNote.randomness.s) } : {}),
-                },
-            };
-
-            const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
-            const authToken = localStorage.getItem('cipherpay_token');
-            await fetch(`${serverUrl}/api/v1/withdraws/map`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
-                },
-                body: JSON.stringify(payload),
-            });
-        } catch (error) {
-            console.warn('[CipherPayService] withdraw mapping registration failed:', error);
-        }
-    }
 
     // Compliance Management
     async generateComplianceReport(startTime, endTime) {
