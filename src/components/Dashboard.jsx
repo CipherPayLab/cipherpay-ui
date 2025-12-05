@@ -24,20 +24,21 @@ function Dashboard() {
     createDeposit,
     approveRelayerDelegate,
     createTransfer,
+    getWithdrawableNotes,
     createWithdraw
   } = useCipherPay();
 
   const [actionLoading, setActionLoading] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
-  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showApproveModal, setShowApproveModal] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
   const [approveAmount, setApproveAmount] = useState('10'); // Default approval for 10 SOL
   const [transferAmount, setTransferAmount] = useState('');
   const [transferRecipient, setTransferRecipient] = useState('');
-  const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [withdrawRecipient, setWithdrawRecipient] = useState('');
+  const [showNoteSelectionModal, setShowNoteSelectionModal] = useState(false);
+  const [withdrawableNotes, setWithdrawableNotes] = useState([]);
+  const [selectedNoteForWithdraw, setSelectedNoteForWithdraw] = useState(null);
   const [isDelegateApproved, setIsDelegateApproved] = useState(false);
 
   const hasRedirected = useRef(false);
@@ -217,31 +218,77 @@ function Dashboard() {
     }
   };
 
-  const handleWithdraw = async () => {
-    if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) {
-      alert('Please enter a valid withdraw amount');
-      return;
-    }
-    if (!withdrawRecipient || withdrawRecipient.trim() === '') {
-      alert('Please enter a recipient address');
-      return;
-    }
+  // Handle withdraw button click - check note count and proceed accordingly
+  const handleWithdrawClick = async () => {
     try {
       setActionLoading(true);
-      const amountInLamports = BigInt(Math.floor(parseFloat(withdrawAmount) * 1e9));
-      const result = await createWithdraw(amountInLamports, withdrawRecipient.trim());
+      
+      // Get withdrawable notes
+      const notes = await getWithdrawableNotes();
+      
+      if (notes.length === 0) {
+        alert('No withdrawable notes available. Please deposit funds first.');
+        return;
+      }
+      
+      // Use connected wallet address as recipient
+      const recipientAddress = publicAddress;
+      if (!recipientAddress) {
+        alert('Please connect your wallet first');
+        return;
+      }
+      
+      if (notes.length === 1) {
+        // Only one note: automatically withdraw the full amount
+        console.log('[Dashboard] Only one note available, auto-withdrawing:', notes[0]);
+        await executeWithdraw(notes[0], recipientAddress);
+      } else {
+        // Multiple notes: show selection modal
+        console.log('[Dashboard] Multiple notes available, showing selection modal:', notes.length);
+        setWithdrawableNotes(notes);
+        setShowNoteSelectionModal(true);
+      }
+    } catch (err) {
+      console.error('Failed to get withdrawable notes:', err);
+      alert(`Failed to get withdrawable notes: ${err.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Execute withdraw with selected note
+  const executeWithdraw = async (note, recipientAddress) => {
+    try {
+      setActionLoading(true);
+      const result = await createWithdraw(note, recipientAddress);
       console.log('Withdraw successful:', result);
-      setShowWithdrawModal(false);
-      setWithdrawAmount('');
-      setWithdrawRecipient('');
+      setShowNoteSelectionModal(false);
+      setSelectedNoteForWithdraw(null);
+      setWithdrawableNotes([]);
       await refreshData();
-      alert(`Withdraw successful! Transaction: ${result.txHash || 'pending'}`);
+      alert(`Withdraw successful! Amount: ${note.amountFormatted || (Number(note.amount) / 1e9).toFixed(9) + ' SOL'}\nTransaction: ${result.txHash || result.signature || 'pending'}`);
     } catch (err) {
       console.error('Failed to withdraw:', err);
       alert(`Withdraw failed: ${err.message || 'Unknown error'}`);
     } finally {
       setActionLoading(false);
     }
+  };
+
+  // Handle note selection from modal
+  const handleNoteSelect = (note) => {
+    setSelectedNoteForWithdraw(note);
+    setShowNoteSelectionModal(false);
+    
+    // Use connected wallet address as recipient
+    const recipientAddress = publicAddress;
+    if (!recipientAddress) {
+      alert('Please connect your wallet first');
+      return;
+    }
+    
+    // Execute withdraw with selected note
+    executeWithdraw(note, recipientAddress);
   };
 
   if (loading) {
@@ -394,7 +441,7 @@ function Dashboard() {
 
               {/* Withdraw */}
               <button
-                onClick={() => setShowWithdrawModal(true)}
+                onClick={handleWithdrawClick}
                 disabled={actionLoading}
                 className="relative group bg-white p-6 focus-within:ring-2 focus-within:ring-inset focus-within:ring-indigo-500 border border-gray-200 rounded-lg hover:border-indigo-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -604,55 +651,57 @@ function Dashboard() {
           </div>
         )}
 
-        {/* Withdraw Modal */}
-        {showWithdrawModal && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowWithdrawModal(false)}>
+        {/* Note Selection Modal for Withdraw */}
+        {showNoteSelectionModal && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50" onClick={() => setShowNoteSelectionModal(false)}>
             <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white" onClick={(e) => e.stopPropagation()}>
               <div className="mt-3">
-                <h3 className="text-lg font-medium text-gray-900 mb-4">Withdraw Funds</h3>
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Recipient Address
-                  </label>
-                  <input
-                    type="text"
-                    value={withdrawRecipient}
-                    onChange={(e) => setWithdrawRecipient(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-                    placeholder="0x..."
-                  />
-                </div>
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Amount (SOL)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    min="0"
-                    value={withdrawAmount}
-                    onChange={(e) => setWithdrawAmount(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-                    placeholder="0.0"
-                  />
+                <h3 className="text-lg font-medium text-gray-900 mb-4">Select Note to Withdraw</h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  Select a note to withdraw. The full amount of the selected note will be withdrawn to your Solana wallet.
+                </p>
+                <div className="mb-4 max-h-96 overflow-y-auto">
+                  {withdrawableNotes.length === 0 ? (
+                    <p className="text-gray-500 text-center py-4">No withdrawable notes available</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {withdrawableNotes.map((note, index) => (
+                        <button
+                          key={index}
+                          onClick={() => handleNoteSelect(note)}
+                          disabled={actionLoading}
+                          className="w-full text-left p-3 border border-gray-300 rounded-md hover:bg-gray-50 hover:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          <div className="flex justify-between items-center">
+                            <div>
+                              <p className="text-sm font-medium text-gray-900">
+                                {note.amountFormatted || (Number(note.amount) / 1e9).toFixed(9) + ' SOL'}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                Note #{index + 1}
+                                {note.commitment && (
+                                  <span className="ml-2">({note.commitment.slice(0, 8)}...)</span>
+                                )}
+                              </p>
+                            </div>
+                            <svg className="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex justify-end space-x-3">
                   <button
                     onClick={() => {
-                      setShowWithdrawModal(false);
-                      setWithdrawAmount('');
-                      setWithdrawRecipient('');
+                      setShowNoteSelectionModal(false);
+                      setWithdrawableNotes([]);
                     }}
                     className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
                   >
                     Cancel
-                  </button>
-                  <button
-                    onClick={handleWithdraw}
-                    disabled={actionLoading || !withdrawAmount || !withdrawRecipient}
-                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {actionLoading ? 'Processing...' : 'Withdraw'}
                   </button>
                 </div>
               </div>

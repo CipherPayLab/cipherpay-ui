@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
 import { getAssociatedTokenAddressSync, NATIVE_MINT, TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction, createSyncNativeInstruction } from '@solana/spl-token';
 import { SystemProgram, Transaction } from '@solana/web3.js';
@@ -33,6 +33,13 @@ export const CipherPayProvider = ({ children }) => {
     // This prevents false authentication state from stale tokens
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [authUser, setAuthUser] = useState(null);
+    
+    // Store event handler references for cleanup
+    const eventHandlersRef = useRef({
+        depositCompleted: null,
+        transferCompleted: null,
+        withdrawCompleted: null
+    });
 
     // Sync Solana wallet state with CipherPay state
     useEffect(() => {
@@ -625,11 +632,24 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Withdrawal Management
-    const createWithdraw = async (amount, recipientAddress) => {
+    // New design: Get withdrawable notes for selection
+    const getWithdrawableNotes = async () => {
+        try {
+            setError(null);
+            const notes = await cipherPayService.getWithdrawableNotes();
+            return notes;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        }
+    };
+
+    // Withdraw the full amount of a selected note
+    const createWithdraw = async (selectedNote, recipientAddress) => {
         try {
             setLoading(true);
             setError(null);
-            const result = await cipherPayService.withdraw(amount, recipientAddress);
+            const result = await cipherPayService.withdraw(selectedNote, recipientAddress);
             await updateServiceStatus(); // Refresh balance and notes
             return result;
         } catch (err) {
@@ -691,14 +711,40 @@ export const CipherPayProvider = ({ children }) => {
                 console.log('[CipherPayContext] signIn: Starting event monitoring for user:', user.ownerCipherPayPubKey);
                 await cipherPayService.startEventMonitoring(user.ownerCipherPayPubKey);
                 
-                // Listen for deposit completed events to refresh account overview
-                cipherPayService.on('depositCompleted', async (eventData) => {
+                // Define event handlers
+                const handleDepositCompleted = async (eventData) => {
                     console.log('[CipherPayContext] Deposit completed event received, refreshing account overview...', eventData);
                     // Wait a bit for backend to process the deposit
                     setTimeout(() => {
                         updateServiceStatus();
                     }, 1000);
-                });
+                };
+                
+                const handleTransferCompleted = async (eventData) => {
+                    console.log('[CipherPayContext] Transfer completed event received, refreshing account overview...', eventData);
+                    // Wait a bit for backend to process the transfer (nullifier tracking, note updates)
+                    setTimeout(() => {
+                        updateServiceStatus();
+                    }, 1000);
+                };
+                
+                const handleWithdrawCompleted = async (eventData) => {
+                    console.log('[CipherPayContext] Withdraw completed event received, refreshing account overview...', eventData);
+                    // Wait a bit for backend to process the withdraw (nullifier tracking)
+                    setTimeout(() => {
+                        updateServiceStatus();
+                    }, 1000);
+                };
+                
+                // Register event listeners
+                cipherPayService.on('depositCompleted', handleDepositCompleted);
+                cipherPayService.on('transferCompleted', handleTransferCompleted);
+                cipherPayService.on('withdrawCompleted', handleWithdrawCompleted);
+                
+                // Store handlers for cleanup on signOut
+                eventHandlersRef.current.depositCompleted = handleDepositCompleted;
+                eventHandlersRef.current.transferCompleted = handleTransferCompleted;
+                eventHandlersRef.current.withdrawCompleted = handleWithdrawCompleted;
             }
             
             // Refresh account overview from backend after authentication
@@ -778,6 +824,20 @@ export const CipherPayProvider = ({ children }) => {
 
     const signOut = async () => {
         try {
+            // Remove event listeners to prevent memory leaks
+            if (eventHandlersRef.current.depositCompleted) {
+                cipherPayService.removeEventListener('depositCompleted', eventHandlersRef.current.depositCompleted);
+                eventHandlersRef.current.depositCompleted = null;
+            }
+            if (eventHandlersRef.current.transferCompleted) {
+                cipherPayService.removeEventListener('transferCompleted', eventHandlersRef.current.transferCompleted);
+                eventHandlersRef.current.transferCompleted = null;
+            }
+            if (eventHandlersRef.current.withdrawCompleted) {
+                cipherPayService.removeEventListener('withdrawCompleted', eventHandlersRef.current.withdrawCompleted);
+                eventHandlersRef.current.withdrawCompleted = null;
+            }
+            
             // Stop event monitoring
             cipherPayService.stopEventMonitoring();
             
@@ -866,6 +926,7 @@ export const CipherPayProvider = ({ children }) => {
         createDeposit,
 
         // Withdrawal Management
+        getWithdrawableNotes,
         createWithdraw,
 
         // Proof Management
