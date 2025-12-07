@@ -5,6 +5,9 @@ import { decryptFromSenderForMe } from '../lib/e2ee';
 
 const API_BASE_URL = import.meta.env.VITE_SERVER_URL || import.meta.env.VITE_API_URL || 'http://localhost:8788';
 
+// Request deduplication: track in-flight requests
+const inFlightRequests = new Map();
+
 /**
  * Fetch messages for the authenticated user
  */
@@ -30,45 +33,77 @@ export async function fetchMessages(options = {}) {
   params.append('offset', offset.toString());
 
   const url = `${API_BASE_URL}/api/v1/messages?${params}`;
+  
+  // Check if request is already in flight
+  if (inFlightRequests.has(url)) {
+    console.log('[accountOverviewService] Reusing in-flight request for:', url);
+    return inFlightRequests.get(url);
+  }
+  
   console.log('[accountOverviewService] Fetching messages from:', url);
   console.log('[accountOverviewService] Token present:', !!token, 'Token length:', token?.length);
 
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-  });
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ message: 'Failed to fetch messages' }));
-    const errorMessage = error.message || `HTTP ${response.status}`;
-    if (response.status === 401) {
-      console.warn('[accountOverviewService] 401 Unauthorized - token may be invalid or expired');
-      console.warn('[accountOverviewService] Error details:', error);
-      // Try to decode JWT to check expiration (without verification)
-      try {
-        const tokenParts = token.split('.');
-        if (tokenParts.length === 3) {
-          const payload = JSON.parse(atob(tokenParts[1]));
-          console.warn('[accountOverviewService] Token payload:', { 
-            sub: payload.sub, 
-            ownerKey: payload.ownerKey?.substring(0, 20) + '...',
-            exp: payload.exp,
-            expDate: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
-            now: new Date().toISOString(),
-            expired: payload.exp ? Date.now() > payload.exp * 1000 : null
-          });
+  const requestPromise = (async () => {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ message: 'Failed to fetch messages' }));
+        const errorMessage = error.message || `HTTP ${response.status}`;
+        if (response.status === 401) {
+          console.warn('[accountOverviewService] 401 Unauthorized - token may be invalid or expired');
+          console.warn('[accountOverviewService] Error details:', error);
+          // Try to decode JWT to check expiration (without verification)
+          try {
+            const tokenParts = token.split('.');
+            if (tokenParts.length === 3) {
+              const payload = JSON.parse(atob(tokenParts[1]));
+              console.warn('[accountOverviewService] Token payload:', { 
+                sub: payload.sub, 
+                ownerKey: payload.ownerKey?.substring(0, 20) + '...',
+                exp: payload.exp,
+                expDate: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+                now: new Date().toISOString(),
+                expired: payload.exp ? Date.now() > payload.exp * 1000 : null
+              });
+            }
+          } catch (e) {
+            console.warn('[accountOverviewService] Could not decode token:', e);
+          }
         }
-      } catch (e) {
-        console.warn('[accountOverviewService] Could not decode token:', e);
+        throw new Error(errorMessage);
       }
-    }
-    throw new Error(errorMessage);
-  }
 
-  return await response.json();
+      return await response.json();
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error('Request timed out after 30 seconds');
+      }
+      throw error;
+    } finally {
+      // Remove from in-flight requests
+      inFlightRequests.delete(url);
+    }
+  })();
+
+  // Store in-flight request
+  inFlightRequests.set(url, requestPromise);
+
+  return requestPromise;
 }
 
 /**

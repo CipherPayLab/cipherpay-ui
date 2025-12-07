@@ -147,6 +147,9 @@ async function loadCircomlib() {
 class AuthService {
   constructor() {
     this.token = localStorage.getItem('cipherpay_token');
+    this.abortController = null; // For canceling in-flight requests
+    this.inFlightChallenge = null; // Track in-flight challenge request to avoid duplicates
+    this.inFlightAuthentication = null; // Track in-flight authentication to avoid duplicates
     this.user = JSON.parse(localStorage.getItem('cipherpay_user') || 'null');
 
     const identityStr = localStorage.getItem('cipherpay_identity');
@@ -244,6 +247,7 @@ class AuthService {
     const instance = axios.create({
       baseURL: SERVER_URL,
       headers: { 'Content-Type': 'application/json' },
+      timeout: 30000, // 30 second timeout to match backend requestTimeout
     });
     instance.interceptors.request.use(
       (config) => {
@@ -625,6 +629,34 @@ class AuthService {
   }
 
   async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null, noteEncPubKey = null) {
+    // Create a unique key for this request to check for duplicates
+    const requestKey = JSON.stringify({ ownerKey, solanaWalletAddress });
+    
+    console.log('[AuthService] requestChallenge called with key:', requestKey.substring(0, 100) + '...');
+    console.log('[AuthService] inFlightChallenge exists:', !!this.inFlightChallenge);
+    if (this.inFlightChallenge) {
+      console.log('[AuthService] inFlightChallenge.key:', this.inFlightChallenge.key.substring(0, 100) + '...');
+      console.log('[AuthService] Keys match:', this.inFlightChallenge.key === requestKey);
+    }
+    
+    // If there's already an identical request in flight, reuse it
+    if (this.inFlightChallenge && this.inFlightChallenge.key === requestKey) {
+      console.log('[AuthService] ✅ REUSING in-flight challenge request for:', ownerKey.substring(0, 20) + '...');
+      return this.inFlightChallenge.promise;
+    }
+    
+    console.log('[AuthService] Creating NEW challenge request');
+    
+    // Cancel any different in-flight request (but not the same one)
+    if (this.abortController && this.inFlightChallenge?.key !== requestKey) {
+      console.log('[AuthService] Canceling different requestChallenge request');
+      this.abortController.abort();
+      this.inFlightChallenge = null;
+    }
+    
+    // Create new abort controller for this request
+    this.abortController = new AbortController();
+    
     const payload = { ownerKey, authPubKey };
     console.log('[AuthService] requestChallenge: solanaWalletAddress parameter:', solanaWalletAddress);
     console.log('[AuthService] requestChallenge: noteEncPubKey parameter:', noteEncPubKey ? noteEncPubKey.substring(0, 20) + '...' : null);
@@ -654,14 +686,43 @@ class AuthService {
     }
     
     console.log('[AuthService] requestChallenge: Final payload:', { ...payload, authPubKey: '...', noteEncPubKey: noteEncPubKey ? '...' : null });
-    const res = await axios.post(`${SERVER_URL}/auth/challenge`, payload);
-    return res.data;
+    
+    const requestPromise = (async () => {
+      try {
+        const res = await axios.post(`${SERVER_URL}/auth/challenge`, payload, {
+          timeout: 30000, // 30 second timeout to match backend requestTimeout
+          signal: this.abortController.signal,
+        });
+        this.abortController = null; // Clear on success
+        this.inFlightChallenge = null;
+        return res.data;
+      } catch (error) {
+        this.abortController = null; // Clear on error
+        this.inFlightChallenge = null;
+        
+        if (error.name === 'AbortError' || error.name === 'CanceledError') {
+          console.log('[AuthService] requestChallenge was canceled');
+          throw new Error('Request was canceled');
+        }
+        throw error;
+      }
+    })();
+    
+    // Store the in-flight request
+    this.inFlightChallenge = {
+      key: requestKey,
+      promise: requestPromise
+    };
+    
+    return requestPromise;
   }
 
   async verifyAuth(ownerKey, nonce, signature, authPubKey = null) {
     try {
       console.log('[AuthService] Verifying auth, URL:', `${SERVER_URL}/auth/verify`);
-      const response = await axios.post(`${SERVER_URL}/auth/verify`, { ownerKey, nonce, signature, authPubKey });
+      const response = await axios.post(`${SERVER_URL}/auth/verify`, { ownerKey, nonce, signature, authPubKey }, {
+        timeout: 30000, // 30 second timeout to match backend requestTimeout
+      });
       console.log('[AuthService] Verify response:', response.data);
       return response.data;
     } catch (error) {
@@ -677,7 +738,19 @@ class AuthService {
   }
 
   async authenticate(sdk = null, solanaWalletAddress = null, solanaWallet = null) {
-    try {
+    // Create deduplication key
+    const authKey = JSON.stringify({ solanaWalletAddress });
+    
+    // Check if authentication is already in progress
+    if (this.inFlightAuthentication && this.inFlightAuthentication.key === authKey) {
+      console.log('[AuthService] ✅ REUSING in-flight authentication for:', solanaWalletAddress);
+      return this.inFlightAuthentication.promise;
+    }
+    
+    console.log('[AuthService] Creating NEW authentication flow');
+    
+    const authPromise = (async () => {
+      try {
       console.log('[AuthService] ====== AUTHENTICATE CALLED (v3 with wallet) ======');
       console.log('[AuthService] Starting authentication flow');
       console.log('[AuthService] Server URL:', SERVER_URL);
@@ -849,14 +922,31 @@ class AuthService {
       this.saveIdentity();
       this.setAuthToken(res.token, res.user);
       console.log('[AuthService] Authentication successful');
+      
+      // Clear in-flight authentication on success
+      this.inFlightAuthentication = null;
+      
       return true;
     } catch (error) {
       console.error('[AuthService] Authentication failed:', error);
       console.error('[AuthService] Error type:', typeof error, error?.constructor?.name);
       console.error('[AuthService] Error message:', error?.message);
       console.error('[AuthService] Error stack:', error?.stack);
+      
+      // Clear in-flight authentication on error
+      this.inFlightAuthentication = null;
+      
       throw error;
     }
+    })();
+    
+    // Store the in-flight authentication
+    this.inFlightAuthentication = {
+      key: authKey,
+      promise: authPromise
+    };
+    
+    return authPromise;
   }
 
   async getMe() {

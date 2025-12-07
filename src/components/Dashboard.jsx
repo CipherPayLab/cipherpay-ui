@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCipherPay } from '../contexts/CipherPayContext';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token';
 import SolanaStatus from './SolanaStatus';
 import SDKStatus from './SDKStatus';
 
@@ -40,6 +41,8 @@ function Dashboard() {
   const [withdrawableNotes, setWithdrawableNotes] = useState([]);
   const [selectedNoteForWithdraw, setSelectedNoteForWithdraw] = useState(null);
   const [isDelegateApproved, setIsDelegateApproved] = useState(false);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [ataBalance, setAtaBalance] = useState(0);
 
   const hasRedirected = useRef(false);
   const hasRefreshed = useRef(false);
@@ -73,6 +76,50 @@ function Dashboard() {
       refreshData();
     }
   }, [isInitialized, isConnected, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch wallet balance and ATA balance
+  useEffect(() => {
+    const fetchBalances = async () => {
+      if (!wallet.publicKey || !connection) {
+        setWalletBalance(0);
+        setAtaBalance(0);
+        return;
+      }
+
+      try {
+        // Fetch wallet SOL balance
+        const balance = await connection.getBalance(wallet.publicKey);
+        setWalletBalance(balance);
+
+        // Fetch wSOL ATA balance
+        try {
+          const wsolMint = NATIVE_MINT;
+          const ata = getAssociatedTokenAddressSync(wsolMint, wallet.publicKey, false);
+          const ataInfo = await connection.getAccountInfo(ata);
+          
+          if (ataInfo) {
+            const tokenAccount = await connection.getTokenAccountBalance(ata);
+            setAtaBalance(Number(tokenAccount.value.amount));
+          } else {
+            setAtaBalance(0);
+          }
+        } catch (err) {
+          console.error('Error fetching ATA balance:', err);
+          setAtaBalance(0);
+        }
+      } catch (err) {
+        console.error('Error fetching wallet balance:', err);
+        setWalletBalance(0);
+      }
+    };
+
+    fetchBalances();
+    
+    // Refresh balances periodically (every 5 seconds)
+    const interval = setInterval(fetchBalances, 5000);
+    
+    return () => clearInterval(interval);
+  }, [wallet.publicKey, connection, isConnected]);
 
   const handleDisconnect = async () => {
     try {
@@ -344,6 +391,20 @@ function Dashboard() {
         <div className="bg-white overflow-hidden shadow rounded-lg mb-6">
           <div className="px-4 py-5 sm:p-6">
             <h2 className="text-lg font-medium text-gray-900 mb-4">Account Overview</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <dt className="text-sm font-medium text-gray-500">Wallet Balance</dt>
+                <dd className="mt-1 text-3xl font-semibold text-gray-900">
+                  {formatBalance(walletBalance)} SOL
+                </dd>
+              </div>
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <dt className="text-sm font-medium text-gray-500">User ATA Balance</dt>
+                <dd className="mt-1 text-3xl font-semibold text-gray-900">
+                  {formatBalance(ataBalance)} SOL
+                </dd>
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-gray-50 p-4 rounded-lg">
                 <dt className="text-sm font-medium text-gray-500">Shielded Balance</dt>
