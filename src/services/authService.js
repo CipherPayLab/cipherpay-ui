@@ -1,7 +1,14 @@
 // Auth Service - Handles authentication with cipherpay-server
 import axios from 'axios';
 import { poseidonHash, poseidonHashForAuth } from '../lib/sdk';
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:8788';
+// Use empty string in dev to use Vite proxy (same-origin), or explicit URL in production
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || (import.meta.env.DEV ? '' : 'http://localhost:8788');
+
+// Debug logging to verify new code is loaded - UPDATED 2025-01-08 01:17
+console.log('[AuthService] Module loaded - SERVER_URL:', SERVER_URL);
+console.log('[AuthService] import.meta.env.DEV:', import.meta.env.DEV);
+console.log('[AuthService] import.meta.env.VITE_SERVER_URL:', import.meta.env.VITE_SERVER_URL);
+console.log('[AuthService] CODE VERSION: 2025-01-08 01:17 - USING VITE PROXY');
 
 /* ---------------- BigInt/bytes normalizers ---------------- */
 function toBigIntFlexible(v) {

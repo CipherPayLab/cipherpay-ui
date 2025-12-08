@@ -3,7 +3,8 @@
 
 import { decryptFromSenderForMe } from '../lib/e2ee';
 
-const API_BASE_URL = import.meta.env.VITE_SERVER_URL || import.meta.env.VITE_API_URL || 'http://localhost:8788';
+// Use empty string in dev to use Vite proxy (same-origin), or explicit URL in production
+const API_BASE_URL = import.meta.env.VITE_SERVER_URL || import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : 'http://localhost:8788');
 
 // Request deduplication: track in-flight requests
 const inFlightRequests = new Map();
