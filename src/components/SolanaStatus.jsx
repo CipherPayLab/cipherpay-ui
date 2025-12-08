@@ -2,170 +2,246 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useCipherPay } from '../contexts/CipherPayContext';
 import cipherPayService from '../services';
 
-// Module-level flag to persist across component remounts (prevents duplicate fetches in StrictMode)
-let globalHasFetched = false;
-let globalFetchInProgress = false;
-
 function SolanaStatus() {
     const { isInitialized, error, sdk } = useCipherPay();
     const [relayerStatus, setRelayerStatus] = useState('checking');
+    const [relayerStatusMessage, setRelayerStatusMessage] = useState('Checking relayer status...');
+    const [lastCheckTime, setLastCheckTime] = useState(null);
     const [merkleRoot, setMerkleRoot] = useState(null);
     const [circuits, setCircuits] = useState([]);
-    const hasFetched = useRef(false);
-    const fetchInProgress = useRef(false);
+    const intervalRef = useRef(null);
+    const isMountedRef = useRef(true);
 
-    useEffect(() => {
-        // Only run once when initialized (check both component-level and module-level flags)
-        if (!isInitialized || hasFetched.current || fetchInProgress.current || globalHasFetched || globalFetchInProgress) {
-            return;
-        }
+    // Get server URL (backend server that proxies to relayer)
+    // Use empty string in dev to use Vite proxy (same-origin)
+    const getServerUrl = () => {
+        return import.meta.env.VITE_SERVER_URL || (import.meta.env.DEV ? '' : 'http://localhost:8788');
+    };
 
-        // Mark as in progress immediately to prevent duplicate calls (even in StrictMode)
-        fetchInProgress.current = true;
-        hasFetched.current = true;
-        globalFetchInProgress = true;
-        globalHasFetched = true;
-        let isMounted = true;
+    const checkRelayerStatus = async () => {
+        if (!isMountedRef.current) return;
 
-        const checkRelayerStatus = async () => {
+        try {
+            const serverUrl = getServerUrl();
+            console.log('[SolanaStatus] Checking relayer health through backend at:', serverUrl);
+            let status = 'unreachable';
+            let message = 'Relayer unreachable';
+
+            // Check relayer health through backend server proxy
+            // Frontend → Backend (cipherpay-server) → Relayer (cipherpay-relayer-solana)
             try {
-                // Try to use SDK service method first
-                if (cipherPayService.sdk?.relayerClient) {
-                    try {
-                        const status = await cipherPayService.sdk.relayerClient.getStatus();
-                        if (isMounted) {
-                            setRelayerStatus(status.status === 'healthy' ? 'healthy' : 'unhealthy');
-                        }
-                        return;
-                    } catch (sdkError) {
-                        console.log('SDK relayer status failed, trying fallback:', sdkError);
-                    }
+                const healthUrl = `${serverUrl}/relayer/health`;
+                // Create AbortController for timeout
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
+                
+                // Get auth token if available (endpoint is public but token might be needed)
+                const token = localStorage.getItem('cipherpay_token');
+                const headers = {
+                    'Content-Type': 'application/json',
+                };
+                if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
                 }
+                
+                const response = await fetch(healthUrl, {
+                    method: 'GET',
+                    headers,
+                    signal: controller.signal,
+                });
+                
+                clearTimeout(timeoutId);
 
-                // Fallback to direct API call
-                const response = await fetch('http://localhost:3000/health');
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
+
                 const contentType = response.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
                     throw new Error('Response is not JSON');
                 }
+
                 const data = await response.json();
-                if (isMounted) {
-                    setRelayerStatus(data.status === 'healthy' ? 'healthy' : 'unhealthy');
+                
+                // Handle different health status formats
+                if (data.status) {
+                    status = data.status === 'healthy' || data.status === 'alive' ? 'healthy' : 
+                            data.status === 'degraded' ? 'degraded' : 
+                            data.status === 'unhealthy' ? 'unhealthy' : 'unhealthy';
+                } else if (data.ok) {
+                    status = 'healthy';
                 }
-            } catch (error) {
-                // Log error - module-level flags prevent duplicate calls
-                if (isMounted) {
-                    console.error('Failed to check relayer status:', error);
-                    setRelayerStatus('unreachable');
+
+                message = data.message || getStatusMessage(status);
+
+                if (isMountedRef.current) {
+                    setRelayerStatus(status);
+                    setRelayerStatusMessage(message);
+                    setLastCheckTime(new Date());
+                }
+            } catch (fetchError) {
+                if (fetchError.name === 'AbortError') {
+                    console.error('Relayer health check timed out');
+                    if (isMountedRef.current) {
+                        setRelayerStatus('unreachable');
+                        setRelayerStatusMessage(`Backend server did not respond in time. Check if the backend and relayer services are running.`);
+                        setLastCheckTime(new Date());
+                    }
+                } else {
+                    console.error('Failed to check relayer status:', fetchError);
+                    if (isMountedRef.current) {
+                        setRelayerStatus('unreachable');
+                        setRelayerStatusMessage(`Cannot reach relayer through backend at ${serverUrl}. Make sure both backend and relayer services are running.`);
+                        setLastCheckTime(new Date());
+                    }
                 }
             }
-        };
+        } catch (error) {
+            console.error('Error checking relayer status:', error);
+            if (isMountedRef.current) {
+                setRelayerStatus('unreachable');
+                setRelayerStatusMessage('Failed to check relayer status');
+                setLastCheckTime(new Date());
+            }
+        }
+    };
 
-        const fetchMerkleRoot = async () => {
+    const getStatusMessage = (status) => {
+        switch (status) {
+            case 'healthy':
+                return 'Relayer is operational';
+            case 'degraded':
+                return 'Relayer is running but may have issues';
+            case 'unhealthy':
+                return 'Relayer is not functioning properly';
+            case 'unreachable':
+                return 'Cannot connect to relayer';
+            default:
+                return 'Checking relayer status...';
+        }
+    };
+
+
+    const fetchMerkleRoot = async () => {
+        if (!isMountedRef.current) return;
+        
+        try {
+            // Try to use SDK service method first
             try {
-                // Try to use SDK service method first
+                const root = await cipherPayService.fetchMerkleRoot();
+                if (isMountedRef.current) {
+                    setMerkleRoot(root);
+                }
+                return;
+            } catch (sdkError) {
+                console.log('SDK merkle root fetch failed, trying fallback:', sdkError);
+            }
+
+            // Fallback to direct API call through backend server
+            const serverUrl = getServerUrl();
+            const response = await fetch(`${serverUrl}/api/v1/merkle/root`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                throw new Error('Response is not JSON');
+            }
+            const data = await response.json();
+            if (data.success && isMountedRef.current) {
+                setMerkleRoot(data.root);
+            }
+        } catch (error) {
+            if (isMountedRef.current) {
+                console.error('Failed to fetch merkle root:', error);
+            }
+        }
+    };
+
+    const fetchCircuits = async () => {
+        if (!isMountedRef.current) return;
+        
+        try {
+            // Try to use SDK service method first
+            if (cipherPayService.sdk?.relayerClient) {
                 try {
-                    const root = await cipherPayService.fetchMerkleRoot();
-                    if (isMounted) {
-                        setMerkleRoot(root);
+                    const circuitsData = await cipherPayService.sdk.relayerClient.getCircuits();
+                    if (isMountedRef.current) {
+                        setCircuits(circuitsData.circuits || []);
                     }
                     return;
                 } catch (sdkError) {
-                    console.log('SDK merkle root fetch failed, trying fallback:', sdkError);
-                }
-
-                // Fallback to direct API call
-                const response = await fetch('http://localhost:3000/api/v1/merkle/root');
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    throw new Error('Response is not JSON');
-                }
-                const data = await response.json();
-                if (data.success && isMounted) {
-                    setMerkleRoot(data.root);
-                }
-            } catch (error) {
-                // Log error - module-level flags prevent duplicate calls
-                if (isMounted) {
-                    console.error('Failed to fetch merkle root:', error);
+                    console.log('SDK circuits fetch failed, trying fallback:', sdkError);
                 }
             }
-        };
 
-        const fetchCircuits = async () => {
+            // Fallback to direct API call through backend server
+            // Note: Circuits endpoint might need to go through backend or directly to relayer
+            // For now, try through backend first, then fallback to relayer if needed
+            const serverUrl = getServerUrl();
+            let response;
             try {
-                // Try to use SDK service method first
-                if (cipherPayService.sdk?.relayerClient) {
-                    try {
-                        const circuitsData = await cipherPayService.sdk.relayerClient.getCircuits();
-                        if (isMounted) {
-                            setCircuits(circuitsData.circuits || []);
-                        }
-                        return;
-                    } catch (sdkError) {
-                        console.log('SDK circuits fetch failed, trying fallback:', sdkError);
-                    }
-                }
-
-                // Fallback to direct API call
-                const response = await fetch('http://localhost:3000/api/v1/circuits');
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    throw new Error('Response is not JSON');
-                }
-                const data = await response.json();
-                if (data.success && isMounted) {
-                    setCircuits(data.circuits);
-                }
-            } catch (error) {
-                // Log error - module-level flags prevent duplicate calls
-                if (isMounted) {
-                    console.error('Failed to fetch circuits:', error);
-                }
+                // Try through backend if it proxies this endpoint
+                response = await fetch(`${serverUrl}/api/v1/circuits`);
+            } catch (serverError) {
+                // If backend doesn't proxy, we might need direct access, but this shouldn't happen in production
+                // For now, just throw the error
+                throw serverError;
             }
-        };
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                throw new Error('Response is not JSON');
+            }
+            const data = await response.json();
+            if (data.success && isMountedRef.current) {
+                setCircuits(data.circuits);
+            }
+        } catch (error) {
+            if (isMountedRef.current) {
+                console.error('Failed to fetch circuits:', error);
+            }
+        }
+    };
 
-        // Run all fetches in parallel
-        Promise.all([
-            checkRelayerStatus().catch(() => {
-                // Errors are already logged in the function, just prevent unhandled rejection
-            }),
-            fetchMerkleRoot().catch(() => {
-                // Errors are already logged in the function, just prevent unhandled rejection
-            }),
-            fetchCircuits().catch(() => {
-                // Errors are already logged in the function, just prevent unhandled rejection
-            })
-        ]).finally(() => {
-            // All fetches complete - keep flags true to prevent re-fetching
-            // This prevents React StrictMode from triggering duplicate fetches
-            globalFetchInProgress = false; // Allow component to remount if needed, but keep hasFetched true
-        });
+    // Initial fetch and periodic health checks
+    useEffect(() => {
+        if (!isInitialized) {
+            return;
+        }
+
+        isMountedRef.current = true;
+
+        // Initial fetch
+        checkRelayerStatus();
+        fetchMerkleRoot();
+        fetchCircuits();
+
+        // Set up periodic health checks every 15 seconds
+        intervalRef.current = setInterval(() => {
+            checkRelayerStatus();
+        }, 15000);
 
         return () => {
-            isMounted = false;
-            // Don't reset fetchInProgress in cleanup - we want it to stay true
-            // to prevent re-fetching in React StrictMode double-invocation
+            isMountedRef.current = false;
+            if (intervalRef.current) {
+                clearInterval(intervalRef.current);
+            }
         };
-    }, [isInitialized]); // Removed 'sdk' from dependencies to prevent infinite loops
+    }, [isInitialized, sdk]);
 
     const getStatusColor = (status) => {
         switch (status) {
             case 'healthy':
                 return 'text-green-600 bg-green-100';
+            case 'degraded':
+                return 'text-yellow-600 bg-yellow-100';
             case 'unhealthy':
                 return 'text-red-600 bg-red-100';
             case 'unreachable':
-                return 'text-yellow-600 bg-yellow-100';
+                return 'text-orange-600 bg-orange-100';
             default:
                 return 'text-gray-600 bg-gray-100';
         }
@@ -175,13 +251,24 @@ function SolanaStatus() {
         switch (status) {
             case 'healthy':
                 return '✅';
+            case 'degraded':
+                return '⚠️';
             case 'unhealthy':
                 return '❌';
             case 'unreachable':
-                return '⚠️';
+                return '🔴';
             default:
                 return '⏳';
         }
+    };
+
+    const formatLastCheckTime = (date) => {
+        if (!date) return '';
+        const now = new Date();
+        const diff = Math.floor((now - date) / 1000);
+        if (diff < 60) return `${diff}s ago`;
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        return date.toLocaleTimeString();
     };
 
     return (
@@ -199,11 +286,31 @@ function SolanaStatus() {
                     </div>
 
                     {/* Relayer Status */}
-                    <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-gray-500">Solana Relayer</span>
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(relayerStatus)}`}>
-                            {getStatusIcon(relayerStatus)} {relayerStatus}
-                        </span>
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-gray-500">Solana Relayer</span>
+                                <div className="group relative">
+                                    <svg className="h-4 w-4 text-gray-400 cursor-help" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                                    </svg>
+                                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-64 p-2 bg-gray-900 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                                        The Solana Relayer (cipherpay-relayer-solana) maintains the Merkle tree for private notes, computes zero-knowledge proofs, and submits transactions to Solana on your behalf. It enables gasless, private transactions. Health status is checked through the backend server (cipherpay-server).
+                                    </div>
+                                </div>
+                            </div>
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(relayerStatus)}`}>
+                                {getStatusIcon(relayerStatus)} {relayerStatus === 'checking' ? 'Checking...' : relayerStatus.charAt(0).toUpperCase() + relayerStatus.slice(1)}
+                            </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-gray-400">{relayerStatusMessage}</span>
+                            {lastCheckTime && (
+                                <span className="text-xs text-gray-400">
+                                    Last check: {formatLastCheckTime(lastCheckTime)}
+                                </span>
+                            )}
+                        </div>
                     </div>
 
                     {/* Merkle Root */}
