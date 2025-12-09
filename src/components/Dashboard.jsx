@@ -48,18 +48,20 @@ function Dashboard() {
   const hasRefreshed = useRef(false);
 
   useEffect(() => {
-    // Redirect to login if not initialized, not connected, or not authenticated
-    // Checking isAuthenticated prevents redirect loop when user disconnects
+    // CRITICAL: Redirect to login if not initialized, not connected, or not authenticated
+    // This protects the dashboard from being accessed without proper authentication
     if (!isInitialized || !isConnected || !isAuthenticated) {
       // Always allow redirect if disconnected - don't block with flag
       // The flag only prevents multiple redirects during the same render cycle
       if (!hasRedirected.current) {
         hasRedirected.current = true;
-        // Use setTimeout with 0 delay instead of requestAnimationFrame to avoid throttling
-        const timeoutId = setTimeout(() => {
-          navigate('/', { replace: true });
-        }, 0);
-        return () => clearTimeout(timeoutId);
+        console.log('[Dashboard] Not authenticated or connected, redirecting to login', {
+          isInitialized,
+          isConnected,
+          isAuthenticated
+        });
+        // Immediate redirect - no delay
+        navigate('/', { replace: true });
       }
       return;
     }
@@ -75,7 +77,24 @@ function Dashboard() {
       hasRefreshed.current = true;
       refreshData();
     }
-  }, [isInitialized, isConnected, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isInitialized, isConnected, isAuthenticated, navigate, refreshData]);
+  
+  // Early return: Don't render dashboard content if not authenticated
+  // This prevents flash of content before redirect
+  if (!isInitialized || !isConnected || !isAuthenticated) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        minHeight: '100vh',
+        fontSize: '18px',
+        color: '#666'
+      }}>
+        Redirecting to login...
+      </div>
+    );
+  }
 
   // Fetch wallet balance and ATA balance
   useEffect(() => {

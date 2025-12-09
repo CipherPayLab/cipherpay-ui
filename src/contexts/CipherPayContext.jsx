@@ -15,6 +15,33 @@ export const useCipherPay = () => {
     return context;
 };
 
+// Utility function to check if JWT token is expired
+const isTokenExpired = (token) => {
+    if (!token) return true;
+    
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        const exp = payload.exp * 1000; // Convert to milliseconds
+        const now = Date.now();
+        const bufferTime = 5 * 60 * 1000; // 5 minutes buffer before actual expiry
+        
+        const timeRemaining = exp - now;
+        const isExpired = timeRemaining < bufferTime;
+        
+        console.log('[Auth] Token expiry check:', {
+            expiresAt: new Date(exp).toISOString(),
+            now: new Date(now).toISOString(),
+            timeRemainingMinutes: Math.floor(timeRemaining / 60000),
+            isExpired
+        });
+        
+        return isExpired;
+    } catch (error) {
+        console.error('[Auth] Failed to parse token:', error);
+        return true; // Treat unparseable tokens as expired
+    }
+};
+
 export const CipherPayProvider = ({ children }) => {
     // Get Solana wallet adapter state
     const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect, sendTransaction } = useWallet();
@@ -314,6 +341,26 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
+            
+            // CRITICAL: Check token expiry BEFORE starting transfer
+            const token = localStorage.getItem('cipherpay_token');
+            if (!token || isTokenExpired(token)) {
+                console.error('[CipherPayContext] Token expired or missing before transfer');
+                // Clear expired token
+                localStorage.removeItem('cipherpay_token');
+                setIsAuthenticated(false);
+                setAuthUser(null);
+                
+                // Show clear error message
+                const errorMsg = 'Your session has expired. Please sign in again to transfer funds.';
+                setError(errorMsg);
+                alert(errorMsg);
+                
+                // Redirect to login page
+                window.location.href = '/';
+                throw new Error('Session expired');
+            }
+            
             console.log('[CipherPayContext] createTransfer: Called with recipientPublicKey:', recipientPublicKey, 'amount:', amount.toString());
             const transaction = await cipherPayService.createTransaction(recipientPublicKey, amount, inputNote);
             console.log('[CipherPayContext] createTransfer: Transaction created:', transaction);
@@ -399,6 +446,25 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
+            
+            // CRITICAL: Check token expiry BEFORE starting deposit
+            const token = localStorage.getItem('cipherpay_token');
+            if (!token || isTokenExpired(token)) {
+                console.error('[CipherPayContext] Token expired or missing before deposit');
+                // Clear expired token
+                localStorage.removeItem('cipherpay_token');
+                setIsAuthenticated(false);
+                setAuthUser(null);
+                
+                // Show clear error message
+                const errorMsg = 'Your session has expired. Please sign in again to deposit funds.';
+                setError(errorMsg);
+                alert(errorMsg);
+                
+                // Redirect to login page
+                window.location.href = '/';
+                throw new Error('Session expired');
+            }
             
             // Validate authentication (needed for server API calls)
             if (!isAuthenticated) {
@@ -649,6 +715,26 @@ export const CipherPayProvider = ({ children }) => {
         try {
             setLoading(true);
             setError(null);
+            
+            // CRITICAL: Check token expiry BEFORE starting withdrawal
+            const token = localStorage.getItem('cipherpay_token');
+            if (!token || isTokenExpired(token)) {
+                console.error('[CipherPayContext] Token expired or missing before withdrawal');
+                // Clear expired token
+                localStorage.removeItem('cipherpay_token');
+                setIsAuthenticated(false);
+                setAuthUser(null);
+                
+                // Show clear error message
+                const errorMsg = 'Your session has expired. Please sign in again to withdraw funds.';
+                setError(errorMsg);
+                alert(errorMsg);
+                
+                // Redirect to login page
+                window.location.href = '/';
+                throw new Error('Session expired');
+            }
+            
             const result = await cipherPayService.withdraw(selectedNote, recipientAddress);
             await updateServiceStatus(); // Refresh balance and notes
             return result;
@@ -883,6 +969,40 @@ export const CipherPayProvider = ({ children }) => {
             // This allows users to navigate to login page without being redirected
         }
     }, [isInitialized, isConnected]);
+
+    // Session monitoring: periodically check token expiry
+    useEffect(() => {
+        if (!isAuthenticated) return;
+        
+        console.log('[CipherPayContext] Starting session monitoring');
+        
+        // Check token expiry every 60 seconds
+        const intervalId = setInterval(() => {
+            const token = localStorage.getItem('cipherpay_token');
+            
+            if (!token || isTokenExpired(token)) {
+                console.warn('[CipherPayContext] Session expired during activity');
+                
+                // Clear expired authentication
+                localStorage.removeItem('cipherpay_token');
+                localStorage.removeItem('cipherpay_user');
+                setIsAuthenticated(false);
+                setAuthUser(null);
+                
+                // Stop monitoring
+                clearInterval(intervalId);
+                
+                // Alert user and redirect
+                alert('Your session has expired. Please sign in again.');
+                window.location.href = '/';
+            }
+        }, 60000); // Check every 60 seconds
+        
+        return () => {
+            console.log('[CipherPayContext] Stopping session monitoring');
+            clearInterval(intervalId);
+        };
+    }, [isAuthenticated]);
 
     // Utility functions
     const refreshData = useCallback(() => {
