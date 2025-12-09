@@ -1359,6 +1359,10 @@ class CipherPayService {
         if (!this.isInitialized) await this.initialize();
 
         try {
+            // Check if merkleTreeClient is available
+            if (!this.sdk?.merkleTreeClient) {
+                throw new Error('Merkle Tree Client is not available. It may not be initialized or may require additional configuration.');
+            }
             return await this.sdk.merkleTreeClient.fetchMerkleRoot();
         } catch (error) {
             console.error('Failed to fetch Merkle root:', error);
@@ -1370,6 +1374,10 @@ class CipherPayService {
         if (!this.isInitialized) await this.initialize();
 
         try {
+            // Check if merkleTreeClient is available
+            if (!this.sdk?.merkleTreeClient) {
+                throw new Error('Merkle Tree Client is not available. It may not be initialized or may require additional configuration.');
+            }
             return await this.sdk.merkleTreeClient.getMerklePath(commitment);
         } catch (error) {
             console.error('Failed to get Merkle path:', error);
