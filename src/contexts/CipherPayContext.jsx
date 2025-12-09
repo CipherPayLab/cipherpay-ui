@@ -42,6 +42,23 @@ const isTokenExpired = (token) => {
     }
 };
 
+// ============================================================================
+// REAL-TIME UPDATES CONFIGURATION
+// ============================================================================
+// Configure automatic polling for incoming transfers/balance updates
+const REALTIME_CONFIG = {
+    // Set to false to completely disable automatic polling (users must refresh manually)
+    enabled: true,
+    
+    // Poll interval in milliseconds (20s = 3 requests/min per user)
+    // Recommended: 15000-30000 (15-30 seconds)
+    pollInterval: 20000,
+    
+    // Skip polling if manually updated within this time (prevents redundant requests)
+    skipIfRecentUpdate: 10000, // 10 seconds
+};
+// ============================================================================
+
 export const CipherPayProvider = ({ children }) => {
     // Get Solana wallet adapter state
     const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: solanaDisconnect, sendTransaction } = useWallet();
@@ -67,6 +84,9 @@ export const CipherPayProvider = ({ children }) => {
         transferCompleted: null,
         withdrawCompleted: null
     });
+    
+    // Real-time updates: Track last update time for smart polling
+    const lastUpdateTimeRef = useRef(Date.now());
 
     // Sync Solana wallet state with CipherPay state
     useEffect(() => {
@@ -137,6 +157,9 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] updateServiceStatus: Service not initialized, skipping');
             return;
         }
+        
+        // Track last update time for smart polling optimization
+        lastUpdateTimeRef.current = Date.now();
 
         const status = cipherPayService.getServiceStatus();
         console.log('[CipherPayContext] updateServiceStatus: Raw status from service:', status);
@@ -1003,6 +1026,86 @@ export const CipherPayProvider = ({ children }) => {
             clearInterval(intervalId);
         };
     }, [isAuthenticated]);
+
+    // Real-time balance updates: Optimized polling for incoming transfers
+    // PERFORMANCE: Polls only when tab is active, with smart caching
+    // See REALTIME_CONFIG above to enable/disable or adjust polling interval
+    useEffect(() => {
+        // Check if feature is enabled
+        if (!REALTIME_CONFIG.enabled) {
+            console.log('[CipherPayContext] Real-time polling disabled by configuration');
+            return;
+        }
+        
+        if (!isAuthenticated || !isInitialized) return;
+        
+        let pollIntervalId = null;
+        let isTabVisible = !document.hidden;
+        
+        console.log('[CipherPayContext] Starting optimized balance polling', {
+            interval: REALTIME_CONFIG.pollInterval / 1000 + 's',
+            requestsPerMin: Math.floor(60000 / REALTIME_CONFIG.pollInterval),
+            activeTabOnly: true,
+            smartCaching: true
+        });
+        
+        // Poll function with smart caching
+        const pollForUpdates = async () => {
+            try {
+                // OPTIMIZATION 1: Skip if tab is not visible
+                if (!isTabVisible) {
+                    console.log('[CipherPayContext] Skipping poll - tab not visible');
+                    return;
+                }
+                
+                // OPTIMIZATION 2: Check token before polling
+                const token = localStorage.getItem('cipherpay_token');
+                if (!token || isTokenExpired(token)) {
+                    if (pollIntervalId) clearInterval(pollIntervalId);
+                    return;
+                }
+                
+                // OPTIMIZATION 3: Skip if recently updated (e.g., after user action)
+                const timeSinceLastUpdate = Date.now() - lastUpdateTimeRef.current;
+                if (timeSinceLastUpdate < REALTIME_CONFIG.skipIfRecentUpdate) {
+                    console.log('[CipherPayContext] Skipping poll - recently updated', {
+                        timeSinceLastUpdate: Math.floor(timeSinceLastUpdate / 1000) + 's'
+                    });
+                    return;
+                }
+                
+                console.log('[CipherPayContext] Polling for new transfers...');
+                await updateServiceStatus();
+                lastUpdateTimeRef.current = Date.now();
+            } catch (error) {
+                // Silently handle errors to avoid disrupting user experience
+                console.warn('[CipherPayContext] Error during poll:', error.message);
+            }
+        };
+        
+        // Start polling
+        pollIntervalId = setInterval(pollForUpdates, REALTIME_CONFIG.pollInterval);
+        
+        // OPTIMIZATION 4: Pause polling when tab is hidden, resume when visible
+        const handleVisibilityChange = () => {
+            isTabVisible = !document.hidden;
+            if (isTabVisible) {
+                console.log('[CipherPayContext] Tab visible - resuming polling');
+                // Poll immediately when tab becomes visible
+                pollForUpdates();
+            } else {
+                console.log('[CipherPayContext] Tab hidden - pausing polling');
+            }
+        };
+        
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        
+        return () => {
+            console.log('[CipherPayContext] Stopping balance polling');
+            if (pollIntervalId) clearInterval(pollIntervalId);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [isAuthenticated, isInitialized]);
 
     // Utility functions
     const refreshData = useCallback(() => {
