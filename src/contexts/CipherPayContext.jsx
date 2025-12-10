@@ -770,9 +770,10 @@ export const CipherPayProvider = ({ children }) => {
     };
 
     // Authentication Management
-    const signIn = async (walletAddressOverride = null) => {
+    const signIn = async (walletAddressOverride = null, username = null) => {
         try {
-            console.log('[CipherPayContext] ====== SIGNIN CALLED (v2) ======');
+            console.log('[CipherPayContext] ====== SIGNIN CALLED (v3 with username) ======');
+            console.log('[CipherPayContext] signIn: Username provided:', username || '(existing user)');
             setLoading(true);
             setError(null);
             // Get Solana wallet address from multiple sources
@@ -801,7 +802,7 @@ export const CipherPayProvider = ({ children }) => {
             console.log('[CipherPayContext] signIn: About to call authService.authenticate with wallet address:', walletAddr);
             console.log('[CipherPayContext] signIn: Solana wallet available:', !!solanaWallet);
             
-            await authService.authenticate(sdk, walletAddr, solanaWallet);
+            await authService.authenticate(sdk, walletAddr, solanaWallet, username);
             setIsAuthenticated(true);
             // Get user from localStorage (stored by authService.setAuthToken)
             const storedUser = localStorage.getItem('cipherpay_user');
@@ -871,11 +872,15 @@ export const CipherPayProvider = ({ children }) => {
         }
     };
 
-    const signUp = async (walletAddressOverride = null) => {
+    const signUp = async (walletAddressOverride = null, username = null) => {
         try {
             setLoading(true);
             setError(null);
-            // Sign up is the same as sign in - server creates user on first challenge
+            // Sign up requires username for new users
+            if (!username) {
+                throw new Error('Username is required for sign up');
+            }
+            console.log('[CipherPayContext] signUp: Username provided:', username);
             // Get Solana wallet address from multiple sources
             // Priority: 1. Override parameter, 2. sessionStorage, 3. context state, 4. wallet adapter
             let walletAddr = walletAddressOverride;
@@ -896,7 +901,7 @@ export const CipherPayProvider = ({ children }) => {
                 solanaPublicKey: solanaPublicKey?.toBase58()
             });
             console.log('[CipherPayContext] signUp: Solana wallet available:', !!solanaWallet);
-            await authService.authenticate(sdk, walletAddr, solanaWallet);
+            await authService.authenticate(sdk, walletAddr, solanaWallet, username);
             setIsAuthenticated(true);
             // Get user from localStorage (stored by authService.setAuthToken)
             const storedUser = localStorage.getItem('cipherpay_user');

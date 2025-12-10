@@ -635,9 +635,9 @@ class AuthService {
     return { x, y };
   }
 
-  async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null, noteEncPubKey = null) {
+  async requestChallenge(ownerKey, authPubKey, solanaWalletAddress = null, noteEncPubKey = null, username = null) {
     // Create a unique key for this request to check for duplicates
-    const requestKey = JSON.stringify({ ownerKey, solanaWalletAddress });
+    const requestKey = JSON.stringify({ ownerKey, solanaWalletAddress, username });
     
     console.log('[AuthService] requestChallenge called with key:', requestKey.substring(0, 100) + '...');
     console.log('[AuthService] inFlightChallenge exists:', !!this.inFlightChallenge);
@@ -667,6 +667,7 @@ class AuthService {
     const payload = { ownerKey, authPubKey };
     console.log('[AuthService] requestChallenge: solanaWalletAddress parameter:', solanaWalletAddress);
     console.log('[AuthService] requestChallenge: noteEncPubKey parameter:', noteEncPubKey ? noteEncPubKey.substring(0, 20) + '...' : null);
+    console.log('[AuthService] requestChallenge: username parameter:', username);
     
     // FALLBACK: If wallet address is not provided, try to get it from sessionStorage
     if (!solanaWalletAddress) {
@@ -690,6 +691,14 @@ class AuthService {
       console.log('[AuthService] requestChallenge: Added noteEncPubKey to payload');
     } else {
       console.log('[AuthService] requestChallenge: noteEncPubKey is falsy, not adding to payload');
+    }
+    
+    // NEW: Add username for new user registration
+    if (username) {
+      payload.username = username;
+      console.log('[AuthService] requestChallenge: Added username to payload:', username);
+    } else {
+      console.log('[AuthService] requestChallenge: username is falsy, not adding to payload (existing user)');
     }
     
     console.log('[AuthService] requestChallenge: Final payload:', { ...payload, authPubKey: '...', noteEncPubKey: noteEncPubKey ? '...' : null });
@@ -744,9 +753,9 @@ class AuthService {
     }
   }
 
-  async authenticate(sdk = null, solanaWalletAddress = null, solanaWallet = null) {
+  async authenticate(sdk = null, solanaWalletAddress = null, solanaWallet = null, username = null) {
     // Create deduplication key
-    const authKey = JSON.stringify({ solanaWalletAddress });
+    const authKey = JSON.stringify({ solanaWalletAddress, username });
     
     // Check if authentication is already in progress
     if (this.inFlightAuthentication && this.inFlightAuthentication.key === authKey) {
@@ -857,8 +866,9 @@ class AuthService {
         throw new Error('Curve25519 encryption public key not found in identity. Please re-authenticate.');
       }
 
-      const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress, noteEncPubKey);
+      const { nonce } = await this.requestChallenge(ownerKey, authPubKey, solanaWalletAddress, noteEncPubKey, username);
       console.log('[AuthService] Challenge received, nonce:', String(nonce).substring(0, 16) + '...');
+      console.log('[AuthService] Username provided for registration:', username || '(existing user)');
       
       // SECURITY: Always require wallet signature for authentication
       // This proves the user is present and approves the authentication
@@ -964,6 +974,56 @@ class AuthService {
     } catch (error) {
       console.error('Failed to get current user:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Check if username is available
+   * @param {string} username - Username to check
+   * @returns {Promise<{available: boolean, valid: boolean, error?: string, suggestions?: string[]}>}
+   */
+  async checkUsernameAvailability(username) {
+    try {
+      const response = await axios.get(`${SERVER_URL}/api/v1/users/username/available`, {
+        params: { username },
+        timeout: 10000,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('[AuthService] Username availability check failed:', error);
+      return {
+        available: false,
+        valid: false,
+        error: 'Failed to check username availability'
+      };
+    }
+  }
+
+  /**
+   * Look up user by username
+   * @param {string} username - Username to lookup
+   * @returns {Promise<{success: boolean, user?: object, error?: string}>}
+   */
+  async lookupUserByUsername(username) {
+    try {
+      const response = await axios.post(`${SERVER_URL}/api/v1/users/lookup`, {
+        username,
+      }, {
+        timeout: 10000,
+      });
+      return response.data;
+    } catch (error) {
+      console.error('[AuthService] User lookup failed:', error);
+      if (error.response?.status === 404) {
+        return {
+          success: false,
+          error: `User @${username} not found`
+        };
+      }
+      return {
+        success: false,
+        error: 'Failed to lookup user'
+      };
     }
   }
 }

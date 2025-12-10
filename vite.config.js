@@ -166,6 +166,18 @@ export default defineConfig({
         target: 'http://localhost:8788',
         changeOrigin: true,
       },
+      '/transactions': {
+        target: 'http://localhost:8788',
+        changeOrigin: true,
+      },
+      '/commitments': {
+        target: 'http://localhost:8788',
+        changeOrigin: true,
+      },
+      '/merkle': {
+        target: 'http://localhost:8788',
+        changeOrigin: true,
+      },
     },
   },
   publicDir: 'public',
