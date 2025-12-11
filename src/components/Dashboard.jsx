@@ -243,52 +243,18 @@ function Dashboard() {
           hasCiphertext: !!a.message?.ciphertext
         })));
         
-        // Decrypt messages to extract amounts
+        // Extract amounts from messages
+        // Use amount field directly from message (unencrypted, stored in DB)
         const enrichedActivities = activities.map(activity => {
           let amount = null;
           
-          if (activity.message?.ciphertext) {
-            try {
-              const decrypted = decryptFromSenderForMe(activity.message.ciphertext);
-              
-              // Handle different message structures:
-              // - Deposits/Transfers: amount is in decrypted.note.amount
-              // - Withdrawals: amount is directly in decrypted.amount
-              if (decrypted?.note?.amount) {
-                // Deposit or Transfer message
-                amount = typeof decrypted.note.amount === 'string'
-                  ? BigInt(decrypted.note.amount.startsWith('0x') ? decrypted.note.amount : `0x${decrypted.note.amount}`)
-                  : BigInt(decrypted.note.amount);
-                
-                // Convert to SOL (divide by 1e9)
-                const amountInSol = Number(amount) / 1e9;
-                amount = amountInSol;
-                console.log('[Dashboard] Successfully decrypted amount for activity', activity.id, ':', amountInSol, 'SOL');
-              } else if (decrypted?.amount) {
-                // Withdrawal message - amount is directly in the decrypted object
-                // Amount is already a string representation, convert to number
-                amount = typeof decrypted.amount === 'string'
-                  ? Number(decrypted.amount) / 1e9  // Convert from lamports to SOL
-                  : Number(decrypted.amount) / 1e9;
-                console.log('[Dashboard] Successfully decrypted withdrawal amount for activity', activity.id, ':', amount, 'SOL');
-              } else {
-                console.warn('[Dashboard] Decrypted message but no amount found for activity', activity.id, {
-                  hasNote: !!decrypted?.note,
-                  hasAmount: !!decrypted?.amount,
-                  keys: decrypted ? Object.keys(decrypted) : []
-                });
-              }
-            } catch (err) {
-              console.error('[Dashboard] Failed to decrypt message for activity:', activity.id, err);
-              // Check if this is a sent transfer (encrypted for recipient, not decryptable by sender)
-              if (activity.event === 'TransferCompleted' && 
-                  activity.sender_key === authUser?.ownerKey && 
-                  activity.recipient_key !== authUser?.ownerKey) {
-                console.log('[Dashboard] Cannot decrypt - this is a sent transfer (encrypted for recipient)');
-              }
-            }
+          // Use amount directly from message (stored in top-level message.amount field)
+          if (activity.message?.amount) {
+            // Amount is stored as string in DB, convert to number and divide by 1e9 to get SOL
+            amount = Number(BigInt(activity.message.amount)) / 1e9;
+            console.log('[Dashboard] Using amount from message field for activity', activity.id, ':', amount, 'SOL');
           } else {
-            console.warn('[Dashboard] No message/ciphertext for activity', activity.id, activity);
+            console.warn('[Dashboard] No amount found in message for activity', activity.id);
           }
           
           return {
@@ -1001,9 +967,12 @@ function Dashboard() {
                       <div className={`text-sm font-semibold ${
                         (getActivityDirection(activity) === 'Received' || getActivityType(activity) === 'Change') 
                           ? 'text-green-600' 
+                          : getActivityDirection(activity) === 'Sent'
+                          ? 'text-red-600'
                           : 'text-gray-900'
                       }`}>
-                        {(getActivityDirection(activity) === 'Received' || getActivityType(activity) === 'Change') ? '+' : ''}
+                        {getActivityDirection(activity) === 'Sent' ? '-' : 
+                         (getActivityDirection(activity) === 'Received' || getActivityType(activity) === 'Change') ? '+' : ''}
                         {activity.amount !== null && activity.amount !== undefined 
                           ? activity.amount.toFixed(4)
                           : (getActivityDirection(activity) === 'Sent' ? 'Sent' : '?')}

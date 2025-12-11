@@ -822,6 +822,12 @@ class CipherPayService {
             ]);
             const inputNullifierHex = inputNullifier.toString(16).padStart(64, '0');
             
+            // Compute sender's ownerCipherPayPubKey from wallet keys (for sender_key field)
+            const ownerWalletPubKey = identity.ownerWalletPubKey || BigInt(0);
+            const ownerWalletPrivKey = identity.ownerWalletPrivKey || BigInt(0);
+            const senderOwnerCipherPayPubKey = await poseidonHash([ownerWalletPubKey, ownerWalletPrivKey]);
+            const senderKey = '0x' + senderOwnerCipherPayPubKey.toString(16).padStart(64, '0');
+            
             // Determine recipient for each output
             // For full transfer: both outputs go to recipient
             // For partial transfer: out1 goes to recipient, out2 goes to sender (change)
@@ -887,6 +893,7 @@ class CipherPayService {
                         // Recipient will derive the matching keypair from their wallet signature seed when decrypting
                         const recipientEncPubKeyB64 = recipientNoteEncPubKey; // Already base64 Curve25519 public key
                         console.log('[CipherPayService] Out1 encryption - Using recipient Curve25519 public key directly from DB (first 20 chars):', recipientEncPubKeyB64.substring(0, 20) + '...');
+                        // Note: amount is stored in top-level message.amount field, not in ciphertext
                         const noteData = {
                             note: {
                                 amount: '0x' + note.amount.toString(16),
@@ -909,9 +916,11 @@ class CipherPayService {
                             },
                             body: JSON.stringify({
                                 recipientKey,
+                                senderKey: senderKey, // Sender's ownerCipherPayPubKey (person making the transfer)
                                 ciphertextB64,
                                 kind: 'note-transfer',
                                 nullifierHex: inputNullifierHex, // Store input note's nullifier with both output messages
+                                amount: note.amount.toString(), // Store amount unencrypted for easy access
                             }),
                         });
                         if (messageResponse.ok) {
@@ -963,6 +972,7 @@ class CipherPayService {
                             encryptionTargetPubKey = recipientNoteEncPubKey;
                         }
                         console.log('[CipherPayService] Out2 encryption - Using public key (first 20 chars):', encryptionTargetPubKey.substring(0, 20) + '...');
+                        // Note: amount is stored in top-level message.amount field, not in ciphertext
                         const noteData = {
                             note: {
                                 amount: '0x' + note.amount.toString(16),
@@ -985,9 +995,11 @@ class CipherPayService {
                             },
                             body: JSON.stringify({
                                 recipientKey,
+                                senderKey: senderKey, // Sender's ownerCipherPayPubKey (person making the transfer)
                                 ciphertextB64,
                                 kind: 'note-transfer',
                                 nullifierHex: inputNullifierHex, // Store input note's nullifier with both output messages
+                                amount: note.amount.toString(), // Store amount unencrypted for easy access
                             }),
                         });
                         if (messageResponse.ok) {
@@ -1005,6 +1017,12 @@ class CipherPayService {
 
             // Call SDK transfer
             const result = await window.CipherPaySDK.transfer(transferParams);
+
+            // Note: We don't need to create a separate "note-transfer-sent" message.
+            // The backend will determine "sent" vs "change" by comparing recipient_key to owner:
+            // - If recipient_key === owner → it's the change
+            // - If recipient_key !== owner → it's the sent transfer
+            // Both messages are already created above (out1 and out2).
 
             return {
                 recipient: recipientPublicKey,
@@ -1186,6 +1204,7 @@ class CipherPayService {
                     const commitmentHex = commitment.toString(16).padStart(64, '0');
                     
                     // Format note data as hex strings (with 0x prefix) for consistency with decrypt function
+                    // Note: amount is stored in top-level message.amount field, not in ciphertext
                     const noteData = {
                         note: {
                             amount: '0x' + note.amount.toString(16),
@@ -1217,6 +1236,7 @@ class CipherPayService {
                             ciphertextB64,
                             kind: 'note-deposit',
                             nullifierHex: commitmentHex, // Store commitment in nullifier_hex field for consistency
+                            amount: note.amount.toString(), // Store amount unencrypted for easy access
                         }),
                     });
                     
@@ -1535,14 +1555,20 @@ class CipherPayService {
                 const recipientEncPubKeyB64 = await getLocalEncPublicKeyB64();
                 if (recipientEncPubKeyB64) {
                     // Create withdraw metadata (pending - will be updated when event is received)
+                    // Note: amount is stored in top-level message.amount field, not in ciphertext
                     const withdrawData = {
                         nullifier: nullifierHex,
                         recipientSolanaAddress: recipientSolanaAddress,
-                        amount: noteAmount.toString(),
                         tokenId: tokenId.toString(),
                         txSignature: null, // Will be updated when WithdrawCompleted event is received
                         status: 'pending',
-                        timestamp: new Date().toISOString()
+                        timestamp: new Date().toISOString(),
+                        // Include note structure for consistency with deposit/transfer messages
+                        note: {
+                            amount: noteAmount.toString(),
+                            tokenId: tokenId.toString(),
+                            ownerCipherPayPubKey: '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0'),
+                        },
                     };
                     
                     // Encrypt the withdraw data
@@ -1563,6 +1589,7 @@ class CipherPayService {
                             ciphertextB64,
                             kind: 'note-withdraw',
                             nullifierHex: nullifierHex,
+                            amount: noteAmount.toString(), // Store amount unencrypted for easy access
                         }),
                     });
                     
