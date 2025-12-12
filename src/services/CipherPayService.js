@@ -1556,6 +1556,8 @@ class CipherPayService {
                 if (recipientEncPubKeyB64) {
                     // Create withdraw metadata (pending - will be updated when event is received)
                     // Note: amount is stored in top-level message.amount field, not in ciphertext
+                    // IMPORTANT: Include full note structure with randomness to match deposit/transfer messages
+                    // This ensures the account overview can compute the correct nullifier
                     const withdrawData = {
                         nullifier: nullifierHex,
                         recipientSolanaAddress: recipientSolanaAddress,
@@ -1563,11 +1565,18 @@ class CipherPayService {
                         txSignature: null, // Will be updated when WithdrawCompleted event is received
                         status: 'pending',
                         timestamp: new Date().toISOString(),
-                        // Include note structure for consistency with deposit/transfer messages
+                        // Include full note structure for consistency with deposit/transfer messages
+                        // This must match the exact note that was deposited/transferred
                         note: {
-                            amount: noteAmount.toString(),
-                            tokenId: tokenId.toString(),
+                            amount: '0x' + noteAmount.toString(16),
+                            tokenId: '0x' + tokenId.toString(16),
                             ownerCipherPayPubKey: '0x' + recipientCipherPayPubKey.toString(16).padStart(64, '0'),
+                            randomness: {
+                                r: '0x' + randomness.toString(16).padStart(64, '0'),
+                                // Note: withdraw doesn't use s randomness, but include it if present in selectedNote
+                                ...(selectedNote.randomness?.s ? { s: '0x' + BigInt(selectedNote.randomness.s).toString(16).padStart(64, '0') } : {}),
+                            },
+                            ...(memo !== 0n ? { memo: '0x' + memo.toString(16) } : {}),
                         },
                     };
                     
