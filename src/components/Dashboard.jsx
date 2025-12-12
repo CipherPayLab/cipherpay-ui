@@ -52,6 +52,9 @@ function Dashboard() {
   const [showNotesModal, setShowNotesModal] = useState(false);
   const [selectedNoteType, setSelectedNoteType] = useState(null); // 'spendable' or 'all'
   const [recentActivities, setRecentActivities] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalActivities, setTotalActivities] = useState(0);
+  const [activitiesPerPage, setActivitiesPerPage] = useState(20);
 
   const hasRedirected = useRef(false);
   const hasRefreshed = useRef(false);
@@ -193,7 +196,7 @@ function Dashboard() {
     return '0';
   };
 
-  const fetchRecentActivities = async () => {
+  const fetchRecentActivities = async (page = currentPage, limit = activitiesPerPage) => {
     try {
       const token = localStorage.getItem('cipherpay_token');
       console.log('[Dashboard] fetchRecentActivities: authUser:', authUser);
@@ -218,8 +221,9 @@ function Dashboard() {
         return;
       }
 
+      const offset = (page - 1) * limit;
       const SERVER_URL = import.meta.env.VITE_SERVER_URL || '';
-      const url = `${SERVER_URL}/transactions?owner=${ownerKey}&limit=10`;
+      const url = `${SERVER_URL}/transactions?owner=${ownerKey}&limit=${limit}&offset=${offset}`;
       console.log('[Dashboard] Fetching activities from:', url);
       
       const response = await fetch(url, {
@@ -232,8 +236,14 @@ function Dashboard() {
       console.log('[Dashboard] Activities response status:', response.status);
       
       if (response.ok) {
-        const activities = await response.json();
+        const data = await response.json();
+        
+        // Handle both old format (array) and new format (object with activities)
+        const activities = Array.isArray(data) ? data : (data.activities || []);
+        const total = Array.isArray(data) ? data.length : (data.total || 0);
+        
         console.log('[Dashboard] Fetched activities:', activities);
+        console.log('[Dashboard] Total activities:', total);
         console.log('[Dashboard] Activity details:', activities.map(a => ({
           id: a.id,
           event: a.event,
@@ -265,6 +275,8 @@ function Dashboard() {
         
         console.log('[Dashboard] Enriched activities with amounts:', enrichedActivities);
         setRecentActivities(enrichedActivities);
+        setTotalActivities(total);
+        setCurrentPage(page);
       } else {
         const errorText = await response.text();
         console.error('[Dashboard] Failed to fetch activities:', response.status, errorText);
@@ -366,15 +378,19 @@ function Dashboard() {
 
   const formatTimestamp = (timestamp) => {
     const date = new Date(timestamp);
-    const now = new Date();
-    const diffInSeconds = Math.floor((now - date) / 1000);
-
-    if (diffInSeconds < 60) return 'Just now';
-    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
-    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
-    if (diffInSeconds < 604800) return `${Math.floor(diffInSeconds / 86400)}d ago`;
     
-    return date.toLocaleDateString();
+    // Format as: "Jan 15, 2024, 2:30 PM" or "15 Jan 2024, 14:30" depending on locale
+    // Using a consistent format that includes date and time
+    const options = {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    };
+    
+    return date.toLocaleString(undefined, options);
   };
 
   const handleApproveDelegate = async () => {
@@ -912,16 +928,37 @@ function Dashboard() {
           <div className="px-4 py-5 sm:p-6">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-medium text-gray-900">Recent Activity</h2>
-              <button
-                onClick={fetchRecentActivities}
-                className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center"
-                title="Refresh activities"
-              >
-                <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                Refresh
-              </button>
+              <div className="flex items-center space-x-3">
+                <label htmlFor="activitiesPerPage" className="text-sm text-gray-600">
+                  Per page:
+                </label>
+                <select
+                  id="activitiesPerPage"
+                  value={activitiesPerPage}
+                  onChange={(e) => {
+                    const newLimit = parseInt(e.target.value);
+                    setActivitiesPerPage(newLimit);
+                    setCurrentPage(1); // Reset to first page when limit changes
+                    fetchRecentActivities(1, newLimit);
+                  }}
+                  className="text-sm border border-gray-300 rounded-md px-2 py-1 text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <button
+                  onClick={() => fetchRecentActivities(currentPage)}
+                  className="text-sm text-indigo-600 hover:text-indigo-800 flex items-center"
+                  title="Refresh activities"
+                >
+                  <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Refresh
+                </button>
+              </div>
             </div>
             {recentActivities.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
@@ -983,6 +1020,91 @@ function Dashboard() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+            
+            {/* Pagination Controls */}
+            {totalActivities > activitiesPerPage && (
+              <>
+                <div className="mt-6 flex items-center justify-between border-t border-gray-200 pt-4">
+                  <div className="flex items-center space-x-2">
+                    {Array.from({ length: Math.ceil(totalActivities / activitiesPerPage) }, (_, i) => i + 1)
+                      .filter(page => {
+                        // Show first page, last page, current page, and pages around current
+                        const totalPages = Math.ceil(totalActivities / activitiesPerPage);
+                        if (totalPages <= 7) return true; // Show all if 7 or fewer pages
+                        if (page === 1 || page === totalPages) return true; // Always show first and last
+                        if (Math.abs(page - currentPage) <= 1) return true; // Show current ± 1
+                        return false;
+                      })
+                      .map((page, index, array) => {
+                        // Add ellipsis between non-consecutive pages
+                        const prevPage = array[index - 1];
+                        const showEllipsisBefore = prevPage && page - prevPage > 1;
+                        
+                        return (
+                          <div key={page} className="flex items-center">
+                            {showEllipsisBefore && (
+                              <span className="px-2 text-gray-500">...</span>
+                            )}
+                            <button
+                              onClick={() => fetchRecentActivities(page)}
+                              className={`px-3 py-1.5 text-sm font-medium rounded-md ${
+                                currentPage === page
+                                  ? 'bg-indigo-600 text-white'
+                                  : 'text-gray-700 bg-white border border-gray-300 hover:bg-gray-50'
+                              }`}
+                            >
+                              {page}
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+                
+                {/* Simple Navigation Buttons */}
+                <div className="mt-4 flex items-center justify-center space-x-2">
+                  <button
+                    onClick={() => fetchRecentActivities(1)}
+                    disabled={currentPage === 1}
+                    className="px-4 py-2 text-lg font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="First page"
+                  >
+                    &laquo;
+                  </button>
+                  <button
+                    onClick={() => fetchRecentActivities(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="px-4 py-2 text-lg font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Previous page"
+                  >
+                    &lsaquo;
+                  </button>
+                  <button
+                    onClick={() => fetchRecentActivities(currentPage + 1)}
+                    disabled={currentPage >= Math.ceil(totalActivities / activitiesPerPage)}
+                    className="px-4 py-2 text-lg font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Next page"
+                  >
+                    &rsaquo;
+                  </button>
+                  <button
+                    onClick={() => fetchRecentActivities(Math.ceil(totalActivities / activitiesPerPage))}
+                    disabled={currentPage >= Math.ceil(totalActivities / activitiesPerPage)}
+                    className="px-4 py-2 text-lg font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Last page"
+                  >
+                    &raquo;
+                  </button>
+                </div>
+              </>
+            )}
+            
+            {/* Page info */}
+            {totalActivities > 0 && (
+              <div className="mt-2 text-xs text-gray-500 text-center">
+                Showing {((currentPage - 1) * activitiesPerPage) + 1} to {Math.min(currentPage * activitiesPerPage, totalActivities)} of {totalActivities} activities
               </div>
             )}
           </div>
