@@ -54,7 +54,7 @@ function Dashboard() {
   const [recentActivities, setRecentActivities] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalActivities, setTotalActivities] = useState(0);
-  const [activitiesPerPage, setActivitiesPerPage] = useState(20);
+  const [activitiesPerPage, setActivitiesPerPage] = useState(10);
 
   const hasRedirected = useRef(false);
   const hasRefreshed = useRef(false);
@@ -391,6 +391,50 @@ function Dashboard() {
     };
     
     return date.toLocaleString(undefined, options);
+  };
+
+  const formatRecipient = (activity) => {
+    if (!activity || activity.event !== 'TransferCompleted') {
+      return null;
+    }
+
+    if (!authUser?.ownerKey) {
+      // Fallback: show username or shortened recipient key
+      if (activity.recipient_username) {
+        return `to @${activity.recipient_username}`;
+      }
+      return activity.recipient_key 
+        ? `to ${activity.recipient_key.slice(0, 8)}...${activity.recipient_key.slice(-6)}`
+        : null;
+    }
+
+    // For change (recipient === sender === you), show "to self"
+    if (activity.sender_key === authUser.ownerKey && 
+        activity.recipient_key === authUser.ownerKey) {
+      return 'to self';
+    }
+
+    // For sent transfers, show recipient username or address
+    if (activity.sender_key === authUser.ownerKey && 
+        activity.recipient_key !== authUser.ownerKey) {
+      if (activity.recipient_username) {
+        return `to @${activity.recipient_username}`;
+      }
+      const recipientKey = activity.recipient_key || '';
+      return `to ${recipientKey.slice(0, 8)}...${recipientKey.slice(-6)}`;
+    }
+
+    // For received transfers, show sender username or address
+    if (activity.recipient_key === authUser.ownerKey && 
+        activity.sender_key !== authUser.ownerKey) {
+      if (activity.sender_username) {
+        return `from @${activity.sender_username}`;
+      }
+      const senderKey = activity.sender_key || '';
+      return `from ${senderKey.slice(0, 8)}...${senderKey.slice(-6)}`;
+    }
+
+    return null;
   };
 
   const handleApproveDelegate = async () => {
@@ -923,11 +967,11 @@ function Dashboard() {
           <SDKStatus />
         </div>
 
-        {/* Recent Activity */}
+        {/* All Activities */}
         <div className="bg-white overflow-hidden shadow rounded-lg">
           <div className="px-4 py-5 sm:p-6">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-medium text-gray-900">Recent Activity</h2>
+              <h2 className="text-lg font-medium text-gray-900">All Activities</h2>
               <div className="flex items-center space-x-3">
                 <label htmlFor="activitiesPerPage" className="text-sm text-gray-600">
                   Per page:
@@ -988,6 +1032,11 @@ function Dashboard() {
                         <p className="text-xs text-gray-500 mt-1">
                           {formatTimestamp(activity.timestamp)}
                         </p>
+                        {formatRecipient(activity) && (
+                          <p className="text-xs text-gray-400 mt-0.5 font-mono">
+                            {formatRecipient(activity)}
+                          </p>
+                        )}
                         {activity.signature && (
                           <a
                             href={`https://explorer.solana.com/tx/${activity.signature}?cluster=custom&customUrl=http://127.0.0.1:8899`}
